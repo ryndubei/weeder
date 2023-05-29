@@ -9,7 +9,7 @@ import System.FilePath
 import System.IO.Silently (hCapture_)
 import System.IO (stdout)
 import Test.Hspec
-import Control.Monad (zipWithM_)
+import Control.Monad (zipWithM_, when)
 import Control.Exception (handle)
 import System.Exit (ExitCode(..))
 
@@ -21,6 +21,9 @@ main = do
     describe "Integration tests" $
       zipWithM_ integrationTestSpec stdoutFiles hieDirectories
 
+-- | Run weeder on hieDirectory, comparing the output to stdoutFile
+-- The directory containing hieDirectory must also have a .dhall file
+-- with the same name as hieDirectory
 integrationTestSpec :: FilePath -> FilePath -> Spec
 integrationTestSpec stdoutFile hieDirectory = do
   it ("produces the expected output for " ++ hieDirectory) $ do
@@ -28,15 +31,20 @@ integrationTestSpec stdoutFile hieDirectory = do
     actualOutput <- integrationTestOutput hieDirectory
     actualOutput `shouldBe` expectedOutput
 
+-- | Returns detected .stdout files in ./test/Spec
 discoverIntegrationTests :: IO [FilePath]
 discoverIntegrationTests = do
   contents <- listDirectory "./test/Spec"
   pure . map ("./test/Spec" </>) $ filter (".stdout" `isExtensionOf`) contents
 
+-- | Run weeder on the given directory for .hie files, returning stdout
 integrationTestOutput :: FilePath -> IO String
-integrationTestOutput hieDirectory = hCapture_ [stdout] $ ignoreExit $
-  Dhall.input Weeder.Config.config (T.pack dhallFile) >>= 
-    Weeder.Main.mainWithConfig ".hie" [hieDirectory] True
+integrationTestOutput hieDirectory = hCapture_ [stdout] $ do
+  isEmpty <- not . any (".hie" `isExtensionOf`) <$> listDirectory hieDirectory
+  when isEmpty $ fail "No .hie files found in directory, this is probably unintended"
+  ignoreExit $
+    Dhall.input Weeder.Config.config (T.pack dhallFile) >>= 
+      Weeder.Main.mainWithConfig ".hie" [hieDirectory] True
   where 
     dhallFile = hieDirectory <.> ".dhall"
 
