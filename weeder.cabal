@@ -17,6 +17,7 @@ extra-doc-files:
     CHANGELOG.md
 extra-source-files:
     test/Spec/*.dhall
+    test/Spec/*.stdout
 
 library
   build-depends:
