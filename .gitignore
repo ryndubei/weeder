@@ -3,4 +3,3 @@
 *.o
 dist-newstyle
 cabal.project.local
-test/hie/

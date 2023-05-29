@@ -1,5 +1,5 @@
 {-# OPTIONS_GHC -Wno-missing-methods #-}
-module Spec.Modulo2 where
+module Spec.Modulo2.Modulo2 where
 
 data Modulo2 = Zero | One
 
