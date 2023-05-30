@@ -18,8 +18,9 @@ main = do
   stdoutFiles <- discoverIntegrationTests
   let hieDirectories = map dropExtension stdoutFiles
   hspec $
-    describe "Integration tests" $
-      zipWithM_ integrationTestSpec stdoutFiles hieDirectories
+    describe "Weeder.Main" $
+      describe "mainWithConfig" $
+        zipWithM_ integrationTestSpec stdoutFiles hieDirectories
 
 -- | Run weeder on hieDirectory, comparing the output to stdoutFile
 -- The directory containing hieDirectory must also have a .dhall file
