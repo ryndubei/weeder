@@ -430,26 +430,26 @@ connectEvidenceVariables = do
     Nothing -> pure ()
 
 updateEvidenceVariables :: MonadState Analysis m => HieAST a -> m ()
-updateEvidenceVariables n = 
-  let identifiers = foldMap (Map.toList . nodeIdentifiers) . foldMap (getSourcedNodeInfo . sourcedNodeInfo) $ expand n
-      evVarUses = filter (\(_, IdentifierDetails{ identInfo }) -> EvidenceVarUse `Set.member` identInfo) identifiers
-      evVarBinds = filter (\(_, IdentifierDetails{ identInfo }) -> Set.filter (not . isEvidenceBind) identInfo /= Set.empty ) identifiers
-   in do
+updateEvidenceVariables n = do
     for_ (trace ("Evidence variable uses: " ++ (show . length) evVarUses) evVarUses) \case
       (Right name, IdentifierDetails{identType = Just i} ) ->
         -- At the moment `identType` seems to always be a number, so this should be fine
         let i' = unsafeCoerce i :: Int
          in #evidenceVariables %= IntMap.insertWith combineEvidenceVariables i' (Nothing, Set.fromList (foldMap pure (nameToDeclaration name)))
       _ -> pure ()
-    for_ (trace ("Evidence variable binds: " ++ (show . length) evVarBinds) evVarBinds) \case 
+    for_ (trace ("Evidence variable binds: " ++ (show . length) evVarBinds) evVarBinds) \case
       (Right name, IdentifierDetails{identType = Just i} ) ->
         let i' = unsafeCoerce i :: Int
          in #evidenceVariables %= IntMap.insertWith combineEvidenceVariables i' (nameToDeclaration name, mempty)
       _ -> pure ()
   where
-    combineEvidenceVariables :: (Maybe Declaration, Set Declaration) -> (Maybe Declaration, Set Declaration) -> (Maybe Declaration, Set Declaration)
     combineEvidenceVariables (bind1, uses1) (bind2, uses2) = (bind1 <|> bind2, uses1 <> uses2)
+    evVarUses = filter (\(_, IdentifierDetails{ identInfo }) -> EvidenceVarUse `Set.member` identInfo) identifiers
+    evVarBinds = filter (\(_, IdentifierDetails{ identInfo }) -> Set.filter isEvidenceBind identInfo /= Set.empty ) identifiers
+    identifiers = flip concatMap (expand n) \Node{sourcedNodeInfo} ->
+      let nodeInfos = Map.elems $ getSourcedNodeInfo sourcedNodeInfo
+       in concatMap (Map.toList . nodeIdentifiers) nodeInfos
 
-expand :: HieAST a -> Seq ( HieAST a )
+expand :: HieAST a -> [HieAST a]
 expand n@Node{ nodeChildren } =
-  pure n <> foldMap expand nodeChildren
+  n : foldMap expand nodeChildren
