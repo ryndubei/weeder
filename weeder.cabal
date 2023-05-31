@@ -67,15 +67,15 @@ executable weeder
 
 test-suite weeder-test
   build-depends:
-    , base
-    , weeder
-    , filepath
-    , directory
-    , silently
-    , hspec
-    , dhall
-    , text
     , aeson
+    , base
+    , dhall
+    , directory
+    , filepath
+    , hspec
+    , silently
+    , text
+    , weeder
   type: exitcode-stdio-1.0
   main-is: Spec.hs
   hs-source-dirs: test
