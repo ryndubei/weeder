@@ -29,15 +29,19 @@ import Algebra.Graph ( Graph, edge, empty, overlay, vertex, vertexList )
 import Algebra.Graph.ToGraph ( dfs )
 
 -- base
-import Control.Applicative ( Alternative )
+import Control.Applicative ( Alternative ((<|>)))
 import Control.Monad ( guard, msum, when )
 import Data.Foldable ( for_, traverse_ )
 import Data.List ( intercalate )
 import Data.Monoid ( First( First ) )
+import Debug.Trace
 import GHC.Generics ( Generic )
 import Prelude hiding ( span )
+import Unsafe.Coerce (unsafeCoerce)
 
 -- containers
+import Data.IntMap.Strict ( IntMap )
+import qualified Data.IntMap.Strict as IntMap
 import Data.Map.Strict ( Map )
 import qualified Data.Map.Strict as Map
 import Data.Sequence ( Seq )
@@ -56,17 +60,18 @@ import GHC.Types.Avail
 import GHC.Types.FieldLabel ( FieldLabel( FieldLabel, flSelector ) )
 import GHC.Iface.Ext.Types
   ( BindType( RegularBind )
-  , ContextInfo( Decl, ValBind, PatternBind, Use, TyDecl, ClassTyDecl )
+  , ContextInfo( Decl, ValBind, PatternBind, Use, TyDecl, ClassTyDecl, EvidenceVarUse )
   , DeclType( DataDec, ClassDec, ConDec )
   , HieAST( Node, nodeChildren, nodeSpan, sourcedNodeInfo )
   , HieASTs( HieASTs )
   , HieFile( HieFile, hie_asts, hie_exports, hie_module, hie_hs_file )
-  , IdentifierDetails( IdentifierDetails, identInfo )
+  , IdentifierDetails( IdentifierDetails, identInfo, identType )
   , NodeAnnotation( NodeAnnotation, nodeAnnotType )
   , NodeInfo( nodeIdentifiers, nodeAnnotations )
   , Scope( ModuleScope )
   , getSourcedNodeInfo
   )
+import GHC.Iface.Ext.Utils (isEvidenceBind)
 import GHC.Unit.Module ( Module, moduleStableString )
 import GHC.Types.Name
   ( Name, nameModule_maybe, nameOccName
@@ -81,7 +86,7 @@ import GHC.Types.Name
 import GHC.Types.SrcLoc ( RealSrcSpan, realSrcSpanEnd, realSrcSpanStart )
 
 -- lens
-import Control.Lens ( (%=) )
+import Control.Lens ( (%=), use )
 
 -- mtl
 import Control.Monad.State.Class ( MonadState )
@@ -141,6 +146,9 @@ data Analysis =
       -- ^ All exports for a given module.
     , modulePaths :: Map Module FilePath
       -- ^ A map from modules to the file path to the .hs file defining them.
+    , evidenceVariables :: IntMap (Maybe Declaration, Set Declaration)
+      -- ^ Map from identTypes to (evidence variable binding, usages of evidence variable). We gradually fill this in
+      -- as we encounter evidence variables.
     }
   deriving
     ( Generic )
@@ -148,7 +156,7 @@ data Analysis =
 
 -- | The empty analysis - the result of analysing zero @.hie@ files.
 emptyAnalysis :: Analysis
-emptyAnalysis = Analysis empty mempty mempty mempty mempty
+emptyAnalysis = Analysis empty mempty mempty mempty mempty mempty
 
 
 -- | A root for reachability analysis.
@@ -187,6 +195,9 @@ analyseHieFile HieFile{ hie_asts = HieASTs hieASTs, hie_exports, hie_module, hie
   for_ hieASTs \ast -> do
     addAllDeclarations ast
     topLevelAnalysis ast
+    updateEvidenceVariables ast
+
+  connectEvidenceVariables
 
   for_ hie_exports ( analyseExport hie_module )
 
@@ -410,3 +421,35 @@ nameToDeclaration name = do
 
 unNodeAnnotation :: NodeAnnotation -> (String, String)
 unNodeAnnotation (NodeAnnotation x y) = (unpackFS x, unpackFS y)
+
+connectEvidenceVariables :: MonadState Analysis m => m ()
+connectEvidenceVariables = do
+  evVarMap <- use #evidenceVariables
+  for_ (trace ("Evidence variable map: " ++ show evVarMap) evVarMap) \(evBinding, evUses) -> case evBinding of
+    Just evBinding' -> mapM_ (`addDependency` evBinding') evUses
+    Nothing -> pure ()
+
+updateEvidenceVariables :: MonadState Analysis m => HieAST a -> m ()
+updateEvidenceVariables n = 
+  let identifiers = foldMap (Map.toList . nodeIdentifiers) . foldMap (getSourcedNodeInfo . sourcedNodeInfo) $ expand n
+      evVarUses = filter (\(_, IdentifierDetails{ identInfo }) -> EvidenceVarUse `Set.member` identInfo) identifiers
+      evVarBinds = filter (\(_, IdentifierDetails{ identInfo }) -> Set.filter (not . isEvidenceBind) identInfo /= Set.empty ) identifiers
+   in do
+    for_ (trace ("Evidence variable uses: " ++ (show . length) evVarUses) evVarUses) \case
+      (Right name, IdentifierDetails{identType = Just i} ) ->
+        -- At the moment `identType` seems to always be a number, so this should be fine
+        let i' = unsafeCoerce i :: Int
+         in #evidenceVariables %= IntMap.insertWith combineEvidenceVariables i' (Nothing, Set.fromList (foldMap pure (nameToDeclaration name)))
+      _ -> pure ()
+    for_ (trace ("Evidence variable binds: " ++ (show . length) evVarBinds) evVarBinds) \case 
+      (Right name, IdentifierDetails{identType = Just i} ) ->
+        let i' = unsafeCoerce i :: Int
+         in #evidenceVariables %= IntMap.insertWith combineEvidenceVariables i' (nameToDeclaration name, mempty)
+      _ -> pure ()
+  where
+    combineEvidenceVariables :: (Maybe Declaration, Set Declaration) -> (Maybe Declaration, Set Declaration) -> (Maybe Declaration, Set Declaration)
+    combineEvidenceVariables (bind1, uses1) (bind2, uses2) = (bind1 <|> bind2, uses1 <> uses2)
+
+expand :: HieAST a -> Seq ( HieAST a )
+expand n@Node{ nodeChildren } =
+  pure n <> foldMap expand nodeChildren
