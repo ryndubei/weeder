@@ -7,6 +7,7 @@
 {-# language NoImplicitPrelude #-}
 {-# language OverloadedLabels #-}
 {-# language OverloadedStrings #-}
+{-# LANGUAGE TupleSections #-}
 
 module Weeder
   ( -- * Analysis
@@ -66,6 +67,7 @@ import GHC.Iface.Ext.Types
   , NodeAnnotation( NodeAnnotation, nodeAnnotType )
   , NodeInfo( nodeIdentifiers, nodeAnnotations )
   , Scope( ModuleScope )
+  , Span
   , getSourcedNodeInfo
   )
 import GHC.Unit.Module ( Module, moduleStableString )
@@ -252,9 +254,8 @@ topLevelAnalysis n@Node{ nodeChildren } = do
     runMaybeT
       ( msum
           [
-          --   analyseStandaloneDeriving n
-          -- ,
-            analyseInstanceDeclaration n
+            analyseStandaloneDeriving n
+          , analyseInstanceDeclaration n
           , analyseBinding n
           , analyseRewriteRule n
           , analyseClassDeclaration n
@@ -342,6 +343,11 @@ analyseDataDeclaration n@Node{ sourcedNodeInfo } = do
 
           for_ ( uses constructor ) ( addDependency conDec )
 
+  for_ ( derivedInstances n ) \(span, d) -> do
+    define d span
+
+    addImplicitRoot d
+
   where
 
     isDataDec = \case
@@ -361,12 +367,33 @@ constructors n@Node{ nodeChildren, sourcedNodeInfo } =
   else
     foldMap constructors nodeChildren
 
+-- TODO: make this work multi-line, i.e. return the span of the 
+-- instance declaration, instead of the deriving keyword
+derivedInstances :: HieAST a -> Seq (Span, Declaration)
+derivedInstances n@Node{ nodeChildren, nodeSpan, sourcedNodeInfo } =
+  if any (Set.member ("HsDerivingClause", "HsDerivingClause") . Set.map unNodeAnnotation . nodeAnnotations) $ getSourcedNodeInfo sourcedNodeInfo
+    then (nodeSpan,) <$> findEvInstBinds n
+    else foldMap derivedInstances nodeChildren
+
+analyseStandaloneDeriving :: (Alternative m, MonadState Analysis m) => HieAST a -> m ()
+analyseStandaloneDeriving n@Node{ nodeSpan, sourcedNodeInfo } = do
+  guard $ any (Set.member ("DerivDecl", "DerivDecl") . Set.map unNodeAnnotation . nodeAnnotations) $ getSourcedNodeInfo sourcedNodeInfo
+
+  for_ (findEvInstBinds n) \d -> do
+    define d nodeSpan
+
+    for_ (uses n) $ addDependency d
+
+    addImplicitRoot d
+
 analysePatternSynonyms :: ( Alternative m, MonadState Analysis m ) => HieAST a -> m ()
 analysePatternSynonyms n@Node{ sourcedNodeInfo } = do
   guard $ any (Set.member ("PatSynBind", "HsBindLR") . Set.map unNodeAnnotation . nodeAnnotations) $ getSourcedNodeInfo sourcedNodeInfo
 
   for_ ( findDeclarations n ) $ for_ ( uses n ) . addDependency
 
+-- TODO: switch this to findIdentifiers' so we have access to spans
+-- and identTypes
 findEvInstBinds :: HieAST a -> Seq Declaration
 findEvInstBinds = 
   findIdentifiers 
@@ -398,9 +425,18 @@ findIdentifiers
   :: ( Set ContextInfo -> Bool )
   -> HieAST a
   -> Seq Declaration
-findIdentifiers f Node{ sourcedNodeInfo, nodeChildren } =
+findIdentifiers f n = fst <$> findIdentifiers' f n
+
+-- | This version also returns the AST that the identifier 
+-- was found in, in case of needing extra information like 
+-- the other identifiers next to it.
+findIdentifiers'
+  :: ( Set ContextInfo -> Bool )
+  -> HieAST a
+  -> Seq (Declaration, HieAST a)
+findIdentifiers' f n@Node{ sourcedNodeInfo, nodeChildren } =
      foldMap
-       ( \case
+       (fmap (,n) . \case
            ( Left _, _ ) ->
              mempty
 
@@ -412,7 +448,7 @@ findIdentifiers f Node{ sourcedNodeInfo, nodeChildren } =
                mempty
            )
        (foldMap (Map.toList . nodeIdentifiers) (getSourcedNodeInfo sourcedNodeInfo))
-  <> foldMap ( findIdentifiers f ) nodeChildren
+  <> foldMap ( findIdentifiers' f ) nodeChildren
 
 
 uses :: HieAST a -> Set Declaration
