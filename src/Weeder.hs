@@ -56,8 +56,9 @@ import GHC.Types.Avail
 import GHC.Types.FieldLabel ( FieldLabel( FieldLabel, flSelector ) )
 import GHC.Iface.Ext.Types
   ( BindType( RegularBind )
-  , ContextInfo( Decl, ValBind, PatternBind, Use, TyDecl, ClassTyDecl )
+  , ContextInfo( Decl, ValBind, PatternBind, Use, TyDecl, ClassTyDecl, EvidenceVarBind )
   , DeclType( DataDec, ClassDec, ConDec )
+  , EvVarSource (EvInstBind)
   , HieAST( Node, nodeChildren, nodeSpan, sourcedNodeInfo )
   , HieASTs( HieASTs )
   , HieFile( HieFile, hie_asts, hie_exports, hie_module, hie_hs_file )
@@ -292,18 +293,27 @@ analyseRewriteRule n@Node{ sourcedNodeInfo } = do
 
 
 analyseInstanceDeclaration :: ( Alternative m, MonadState Analysis m ) => HieAST a -> m ()
-analyseInstanceDeclaration n@Node{ sourcedNodeInfo } = do
+analyseInstanceDeclaration n@Node{ nodeSpan , sourcedNodeInfo } = do
   guard $ any (Set.member ("ClsInstD", "InstDecl") . Set.map unNodeAnnotation . nodeAnnotations) $ getSourcedNodeInfo sourcedNodeInfo
 
-  traverse_ addImplicitRoot ( uses n )
+  for_ ( findEvInstBinds n ) \d -> do
+    define d nodeSpan 
+      -- ^ This makes instance declarations show up in 
+      -- the output if type-class-roots is set to False.
+
+    for_ ( uses n ) $ addDependency d
+
+    addImplicitRoot d
 
 
 analyseClassDeclaration :: ( Alternative m, MonadState Analysis m ) => HieAST a -> m ()
-analyseClassDeclaration n@Node{ sourcedNodeInfo } = do
+analyseClassDeclaration n@Node{ nodeSpan, sourcedNodeInfo } = do
   guard $ any (Set.member ("ClassDecl", "TyClDecl") . Set.map unNodeAnnotation . nodeAnnotations) $ getSourcedNodeInfo sourcedNodeInfo
 
-  for_ ( findIdentifiers isClassDeclaration n ) $
-    for_ ( findIdentifiers ( const True ) n ) . addDependency
+  for_ ( findIdentifiers isClassDeclaration n ) $ \d -> do
+    define d nodeSpan
+
+    (for_ ( findIdentifiers ( const True ) n ) . addDependency) d
 
   where
 
@@ -357,6 +367,16 @@ analysePatternSynonyms n@Node{ sourcedNodeInfo } = do
 
   for_ ( findDeclarations n ) $ for_ ( uses n ) . addDependency
 
+findEvInstBinds :: HieAST a -> Seq Declaration
+findEvInstBinds = 
+  findIdentifiers 
+    (   not 
+      . Set.null 
+      . Set.filter \case
+          EvidenceVarBind EvInstBind{} ModuleScope _ -> True
+          _ -> False
+    )
+
 findDeclarations :: HieAST a -> Seq Declaration
 findDeclarations =
   findIdentifiers
@@ -373,7 +393,6 @@ findDeclarations =
           -- Anything else is not a declaration
           _ -> False
     )
-
 
 findIdentifiers
   :: ( Set ContextInfo -> Bool )
