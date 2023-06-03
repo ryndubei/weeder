@@ -67,7 +67,6 @@ import GHC.Iface.Ext.Types
   , NodeAnnotation( NodeAnnotation, nodeAnnotType )
   , NodeInfo( nodeIdentifiers, nodeAnnotations )
   , Scope( ModuleScope )
-  , Span
   , getSourcedNodeInfo
   )
 import GHC.Unit.Module ( Module, moduleStableString )
@@ -343,8 +342,10 @@ analyseDataDeclaration n@Node{ sourcedNodeInfo } = do
 
           for_ ( uses constructor ) ( addDependency conDec )
 
-  for_ ( derivedInstances n ) \(span, d) -> do
-    define d span
+  for_ ( derivedInstances n ) \(d, ast) -> do
+    define d (nodeSpan ast)
+
+    for_ ( uses ast ) $ addDependency d
 
     addImplicitRoot d
 
@@ -367,12 +368,10 @@ constructors n@Node{ nodeChildren, sourcedNodeInfo } =
   else
     foldMap constructors nodeChildren
 
--- TODO: make this work multi-line, i.e. return the span of the 
--- instance declaration, instead of the deriving keyword
-derivedInstances :: HieAST a -> Seq (Span, Declaration)
-derivedInstances n@Node{ nodeChildren, nodeSpan, sourcedNodeInfo } =
+derivedInstances :: HieAST a -> Seq (Declaration, HieAST a)
+derivedInstances n@Node{ nodeChildren, sourcedNodeInfo } =
   if any (Set.member ("HsDerivingClause", "HsDerivingClause") . Set.map unNodeAnnotation . nodeAnnotations) $ getSourcedNodeInfo sourcedNodeInfo
-    then (nodeSpan,) <$> findEvInstBinds n
+    then findEvInstBinds' n
     else foldMap derivedInstances nodeChildren
 
 analyseStandaloneDeriving :: (Alternative m, MonadState Analysis m) => HieAST a -> m ()
@@ -392,11 +391,12 @@ analysePatternSynonyms n@Node{ sourcedNodeInfo } = do
 
   for_ ( findDeclarations n ) $ for_ ( uses n ) . addDependency
 
--- TODO: switch this to findIdentifiers' so we have access to spans
--- and identTypes
 findEvInstBinds :: HieAST a -> Seq Declaration
-findEvInstBinds = 
-  findIdentifiers 
+findEvInstBinds = fmap fst . findEvInstBinds'
+
+findEvInstBinds' :: HieAST a -> Seq (Declaration, HieAST a)
+findEvInstBinds' = 
+  findIdentifiers' 
     (   not 
       . Set.null 
       . Set.filter \case
