@@ -7,7 +7,7 @@
 {-# language NoImplicitPrelude #-}
 {-# language OverloadedLabels #-}
 {-# language OverloadedStrings #-}
-{-# LANGUAGE TupleSections #-}
+{-# language TupleSections #-}
 
 module Weeder
   ( -- * Analysis
@@ -297,9 +297,9 @@ analyseInstanceDeclaration n@Node{ nodeSpan , sourcedNodeInfo } = do
   guard $ any (Set.member ("ClsInstD", "InstDecl") . Set.map unNodeAnnotation . nodeAnnotations) $ getSourcedNodeInfo sourcedNodeInfo
 
   for_ ( findEvInstBinds n ) \d -> do
+    -- This makes instance declarations show up in 
+    -- the output if type-class-roots is set to False.
     define d nodeSpan 
-      -- ^ This makes instance declarations show up in 
-      -- the output if type-class-roots is set to False.
 
     for_ ( uses n ) $ addDependency d
 
@@ -368,11 +368,15 @@ constructors n@Node{ nodeChildren, sourcedNodeInfo } =
   else
     foldMap constructors nodeChildren
 
+
 derivedInstances :: HieAST a -> Seq (Declaration, HieAST a)
 derivedInstances n@Node{ nodeChildren, sourcedNodeInfo } =
   if any (Set.member ("HsDerivingClause", "HsDerivingClause") . Set.map unNodeAnnotation . nodeAnnotations) $ getSourcedNodeInfo sourcedNodeInfo
     then findEvInstBinds' n
-    else foldMap derivedInstances nodeChildren
+
+  else 
+    foldMap derivedInstances nodeChildren
+
 
 analyseStandaloneDeriving :: (Alternative m, MonadState Analysis m) => HieAST a -> m ()
 analyseStandaloneDeriving n@Node{ nodeSpan, sourcedNodeInfo } = do
@@ -385,14 +389,17 @@ analyseStandaloneDeriving n@Node{ nodeSpan, sourcedNodeInfo } = do
 
     addImplicitRoot d
 
+
 analysePatternSynonyms :: ( Alternative m, MonadState Analysis m ) => HieAST a -> m ()
 analysePatternSynonyms n@Node{ sourcedNodeInfo } = do
   guard $ any (Set.member ("PatSynBind", "HsBindLR") . Set.map unNodeAnnotation . nodeAnnotations) $ getSourcedNodeInfo sourcedNodeInfo
 
   for_ ( findDeclarations n ) $ for_ ( uses n ) . addDependency
 
+
 findEvInstBinds :: HieAST a -> Seq Declaration
 findEvInstBinds = fmap fst . findEvInstBinds'
+
 
 findEvInstBinds' :: HieAST a -> Seq (Declaration, HieAST a)
 findEvInstBinds' = 
@@ -403,6 +410,7 @@ findEvInstBinds' =
           EvidenceVarBind EvInstBind{} ModuleScope _ -> True
           _ -> False
     )
+
 
 findDeclarations :: HieAST a -> Seq Declaration
 findDeclarations =
@@ -421,11 +429,13 @@ findDeclarations =
           _ -> False
     )
 
+
 findIdentifiers
   :: ( Set ContextInfo -> Bool )
   -> HieAST a
   -> Seq Declaration
 findIdentifiers f n = fst <$> findIdentifiers' f n
+
 
 -- | This version also returns the AST that the identifier 
 -- was found in, in case of needing extra information like 
