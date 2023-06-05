@@ -10,16 +10,19 @@ module Weeder.Main ( main, mainWithConfig, mainWithConfig' ) where
 
 -- base
 import Control.Monad ( guard, unless, when )
-import Control.Monad.IO.Class ( liftIO )
 import Data.Bool
 import Data.Foldable
 import Data.List ( isSuffixOf )
+import Data.Maybe (mapMaybe, listToMaybe)
 import Data.Version ( showVersion )
 import System.Exit ( exitFailure )
+import System.IO ( stderr, hPrint, hPutStr, hPutStrLn )
 
 -- containers
+import Data.Map.Strict ((!))
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
+import qualified Data.Tree as Tree
 
 -- text
 import qualified Data.Text as T
@@ -35,11 +38,13 @@ import System.FilePath ( isExtensionOf )
 
 -- ghc
 import GHC.Iface.Ext.Binary ( HieFileResult( HieFileResult, hie_file_result ), readHieFileWithVersion )
-import GHC.Iface.Ext.Types ( HieFile( hie_hs_file ), hieVersion )
+import GHC.Iface.Ext.Types ( HieFile(.. ), hieVersion, HieASTs (..) )
+import GHC.Iface.Ext.Utils ( generateReferencesMap, getEvidenceTree )
 import GHC.Unit.Module ( moduleName, moduleNameString )
 import GHC.Types.Name.Cache ( initNameCache, NameCache )
 import GHC.Types.Name ( occNameString )
 import GHC.Types.SrcLoc ( RealSrcLoc, realSrcSpanStart, srcLocLine )
+import GHC.Utils.Outputable ( Outputable(..), showSDocUnsafe )
 
 -- regex-tdfa
 import Text.Regex.TDFA ( (=~) )
@@ -103,8 +108,8 @@ main = do
 -- This will recursively find all files with the given extension in the given directories, perform
 -- analysis, and report all unused definitions according to the 'Config'.
 mainWithConfig :: String -> [FilePath] -> Bool -> Config -> IO ()
-mainWithConfig hieExt hieDirectories requireHsFiles weederConfig = 
-  mainWithConfig' hieExt hieDirectories requireHsFiles weederConfig 
+mainWithConfig hieExt hieDirectories requireHsFiles weederConfig =
+  mainWithConfig' hieExt hieDirectories requireHsFiles weederConfig
     >>= \(success, _) -> unless success exitFailure
 
 
@@ -128,13 +133,47 @@ mainWithConfig' hieExt hieDirectories requireHsFiles Config{ rootPatterns, typeC
   nameCache <-
     initNameCache 'z' []
 
+  hieFileResults <-
+    mapM ( readCompatibleHieFileOrExit nameCache ) hieFilePaths
+
+  -- before considering evidence variables
   analysis <-
     flip execStateT emptyAnalysis do
-      for_ hieFilePaths \hieFilePath -> do
-        hieFileResult <- liftIO ( readCompatibleHieFileOrExit nameCache hieFilePath )
+      for_ hieFileResults \hieFileResult -> do
         let hsFileExists = any ( hie_hs_file hieFileResult `isSuffixOf` ) hsFilePaths
         when (requireHsFiles ==> hsFileExists) do
           analyseHieFile hieFileResult
+
+  let
+    asts = concatMap (Map.elems . getAsts . hie_asts) hieFileResults
+
+    getEvidenceTrees = mapMaybe (getEvidenceTree (generateReferencesMap asts))
+
+    evidenceTreesMap = fmap 
+      ( getEvidenceTrees 
+      . concat 
+      . concatMap Tree.flatten 
+      ) (requestedEvidence analysis)
+    
+    lastEvidenceLevel = fmap 
+      ( concat 
+      . mapMaybe 
+        ( listToMaybe 
+        . reverse 
+        . Tree.levels 
+        ) 
+      ) evidenceTreesMap
+
+  for_ ( Map.keys lastEvidenceLevel ) \d -> do
+    hPrint stderr d
+    for_ ( lastEvidenceLevel!d ) \evidenceInfo -> do 
+      hPutStr stderr "\t"
+      let sdoc = ppr evidenceInfo
+      hPutStrLn stderr (showSDocUnsafe sdoc)
+      -- addDependency d (evidenceVar . nameToDeclaration $ evidenceInfo)
+      -- done?
+      -- also should filter for when evidenceDetails is either
+      -- Nothing or Just (_, ModuleScope, _)
 
   let
     roots =
