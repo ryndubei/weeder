@@ -12,8 +12,7 @@
 module Weeder
   ( -- * Analysis
     Analysis(..)
-  , analyseHieFile
-  , analyseEvidence
+  , analyseHieFiles
   , emptyAnalysis
   , allDeclarations
 
@@ -66,7 +65,7 @@ import GHC.Iface.Ext.Types
   , DeclType( DataDec, ClassDec, ConDec )
   , EvVarSource (EvInstBind)
   , HieAST( Node, nodeChildren, nodeSpan, sourcedNodeInfo )
-  , HieASTs( HieASTs )
+  , HieASTs( HieASTs, getAsts )
   , HieFile( HieFile, hie_asts, hie_exports, hie_module, hie_hs_file )
   , IdentifierDetails( IdentifierDetails, identInfo )
   , NodeAnnotation( NodeAnnotation, nodeAnnotType )
@@ -205,6 +204,16 @@ analyseHieFile HieFile{ hie_asts = HieASTs hieASTs, hie_exports, hie_module, hie
     topLevelAnalysis ast
 
   for_ hie_exports ( analyseExport hie_module )
+
+
+-- | Incrementally update 'Analysis' with information in every 'HieFile'.
+analyseHieFiles :: (Foldable f, MonadState Analysis m) => f HieFile -> m ()
+analyseHieFiles hieFiles = do
+  traverse_ analyseHieFile hieFiles
+
+  let asts = concatMap (Map.elems . getAsts . hie_asts) hieFiles
+
+  analyseEvidence asts
 
 
 -- | Follow evidence usages back to their type class instance bindings and connect

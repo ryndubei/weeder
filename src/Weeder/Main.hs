@@ -9,7 +9,7 @@
 module Weeder.Main ( main, mainWithConfig, mainWithConfig' ) where
 
 -- base
-import Control.Monad ( guard, unless, when )
+import Control.Monad ( guard, unless )
 import Data.Bool
 import Data.Foldable
 import Data.List ( isSuffixOf )
@@ -34,7 +34,7 @@ import System.FilePath ( isExtensionOf )
 
 -- ghc
 import GHC.Iface.Ext.Binary ( HieFileResult( HieFileResult, hie_file_result ), readHieFileWithVersion )
-import GHC.Iface.Ext.Types ( HieFile(.. ), hieVersion, HieASTs (..) )
+import GHC.Iface.Ext.Types ( HieFile(.. ), hieVersion )
 import GHC.Unit.Module ( moduleName, moduleNameString )
 import GHC.Types.Name.Cache ( initNameCache, NameCache )
 import GHC.Types.Name ( occNameString )
@@ -130,19 +130,13 @@ mainWithConfig' hieExt hieDirectories requireHsFiles Config{ rootPatterns, typeC
   hieFileResults <-
     mapM ( readCompatibleHieFileOrExit nameCache ) hieFilePaths
 
-  -- before considering evidence variables
-  initialAnalysis <-
-    flip execStateT emptyAnalysis do
-      for_ hieFileResults \hieFileResult -> do
-        let hsFileExists = any ( hie_hs_file hieFileResult `isSuffixOf` ) hsFilePaths
-        when (requireHsFiles ==> hsFileExists) do
-          analyseHieFile hieFileResult
-
   let
-    asts = concatMap (Map.elems . getAsts . hie_asts) hieFileResults
+    hieFileResults' = flip filter hieFileResults \hieFileResult ->
+      let hsFileExists = any ( hie_hs_file hieFileResult `isSuffixOf` ) hsFilePaths
+       in requireHsFiles ==> hsFileExists
 
-  analysis <- 
-    execStateT (analyseEvidence asts) initialAnalysis
+  analysis <-
+    execStateT ( analyseHieFiles hieFileResults' ) emptyAnalysis
 
   let
     roots =
