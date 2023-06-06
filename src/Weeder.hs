@@ -13,6 +13,7 @@ module Weeder
   ( -- * Analysis
     Analysis(..)
   , analyseHieFile
+  , analyseEvidence
   , emptyAnalysis
   , allDeclarations
 
@@ -22,8 +23,6 @@ module Weeder
 
     -- * Declarations
   , Declaration(..)
-  , addDependency
-  , nameToDeclaration
   )
    where
 
@@ -34,7 +33,9 @@ import Algebra.Graph.ToGraph ( dfs )
 -- base
 import Control.Applicative ( Alternative )
 import Control.Monad ( guard, msum, when )
+import Data.Maybe ( mapMaybe )
 import Data.Foldable ( for_, traverse_ )
+import Data.Functor ( (<&>) )
 import Data.List ( intercalate )
 import Data.Monoid ( First( First ) )
 import GHC.Generics ( Generic )
@@ -73,7 +74,12 @@ import GHC.Iface.Ext.Types
   , Scope( ModuleScope )
   , getSourcedNodeInfo,
   )
-import GHC.Iface.Ext.Utils ( findEvidenceUse )
+import GHC.Iface.Ext.Utils 
+  ( EvidenceInfo( EvidenceInfo, evidenceVar )
+  , findEvidenceUse
+  , getEvidenceTree
+  , generateReferencesMap 
+  )
 import GHC.Unit.Module ( Module, moduleStableString )
 import GHC.Types.Name
   ( Name, nameModule_maybe, nameOccName
@@ -91,7 +97,7 @@ import GHC.Types.SrcLoc ( RealSrcSpan, realSrcSpanEnd, realSrcSpanStart )
 import Control.Lens ( (%=) )
 
 -- mtl
-import Control.Monad.State.Class ( MonadState )
+import Control.Monad.State.Class ( MonadState, get )
 
 -- transformers
 import Control.Monad.Trans.Maybe ( runMaybeT )
@@ -199,6 +205,28 @@ analyseHieFile HieFile{ hie_asts = HieASTs hieASTs, hie_exports, hie_module, hie
     topLevelAnalysis ast
 
   for_ hie_exports ( analyseExport hie_module )
+
+
+-- | Follow evidence usages back to their type class instance bindings and connect
+-- them to declarations as per the @requestEvidence@ field of @Analysis@. Applied 
+-- after @analyseHieFile@ and takes HieASTs from every HieFile used at once.
+analyseEvidence :: (Foldable f, MonadState Analysis m) => f (HieAST a) -> m ()
+analyseEvidence asts = do
+  analysis <- get
+
+  let evidenceInfos = fmap (concatMap Tree.flatten . getEvidenceTrees) (requestedEvidence analysis)
+      instanceEvidenceInfos = evidenceInfos <&> filter \case 
+        EvidenceInfo _ _ _ (Just (EvInstBind _ _, ModuleScope, _)) -> True
+        _ -> False
+
+  for_ ( Map.toList instanceEvidenceInfos ) \(d, evs) -> do
+    for_ evs \ev -> do
+      let name = nameToDeclaration (evidenceVar ev)
+      mapM_ (addDependency d) name
+
+  where
+    
+    getEvidenceTrees = mapMaybe (getEvidenceTree (generateReferencesMap asts))
 
 
 analyseExport :: MonadState Analysis m => Module -> AvailInfo -> m ()

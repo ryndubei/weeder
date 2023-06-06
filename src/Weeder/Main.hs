@@ -3,7 +3,6 @@
 {-# language FlexibleContexts #-}
 {-# language NamedFieldPuns #-}
 {-# language OverloadedStrings #-}
-{-# language LambdaCase #-}
 
 -- | This module provides an entry point to the Weeder executable.
 
@@ -14,15 +13,12 @@ import Control.Monad ( guard, unless, when )
 import Data.Bool
 import Data.Foldable
 import Data.List ( isSuffixOf )
-import Data.Maybe (mapMaybe)
-import Data.Functor ((<&>))
 import Data.Version ( showVersion )
 import System.Exit ( exitFailure )
 
 -- containers
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
-import qualified Data.Tree as Tree
 
 -- text
 import qualified Data.Text as T
@@ -38,8 +34,7 @@ import System.FilePath ( isExtensionOf )
 
 -- ghc
 import GHC.Iface.Ext.Binary ( HieFileResult( HieFileResult, hie_file_result ), readHieFileWithVersion )
-import GHC.Iface.Ext.Types ( HieFile(.. ), hieVersion, HieASTs (..), EvVarSource (..), Scope (..) )
-import GHC.Iface.Ext.Utils ( generateReferencesMap, getEvidenceTree, EvidenceInfo (..) )
+import GHC.Iface.Ext.Types ( HieFile(.. ), hieVersion, HieASTs (..) )
 import GHC.Unit.Module ( moduleName, moduleNameString )
 import GHC.Types.Name.Cache ( initNameCache, NameCache )
 import GHC.Types.Name ( occNameString )
@@ -146,21 +141,8 @@ mainWithConfig' hieExt hieDirectories requireHsFiles Config{ rootPatterns, typeC
   let
     asts = concatMap (Map.elems . getAsts . hie_asts) hieFileResults
 
-    getEvidenceTrees = mapMaybe (getEvidenceTree (generateReferencesMap asts))
-
-    evidenceInfos = fmap (concatMap Tree.flatten . getEvidenceTrees) (requestedEvidence initialAnalysis)
-
-    instanceEvidenceInfos = 
-      evidenceInfos <&> filter \case 
-        EvidenceInfo _ _ _ (Just (EvInstBind _ _, ModuleScope, _)) -> True
-        _ -> False
-
   analysis <- 
-    flip execStateT initialAnalysis do
-      for_ ( Map.toList instanceEvidenceInfos ) \(d, evs) -> do
-        for_ evs \ev -> do
-          let name = nameToDeclaration (evidenceVar ev)
-          mapM_ (addDependency d) name
+    execStateT (analyseEvidence asts) initialAnalysis
 
   let
     roots =
