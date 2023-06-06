@@ -3,6 +3,7 @@
 {-# language FlexibleContexts #-}
 {-# language NamedFieldPuns #-}
 {-# language OverloadedStrings #-}
+{-# language LambdaCase #-}
 
 -- | This module provides an entry point to the Weeder executable.
 
@@ -13,13 +14,12 @@ import Control.Monad ( guard, unless, when )
 import Data.Bool
 import Data.Foldable
 import Data.List ( isSuffixOf )
-import Data.Maybe (mapMaybe, listToMaybe)
+import Data.Maybe (mapMaybe)
+import Data.Functor ((<&>))
 import Data.Version ( showVersion )
 import System.Exit ( exitFailure )
-import System.IO ( stderr, hPrint, hPutStr, hPutStrLn )
 
 -- containers
-import Data.Map.Strict ((!))
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Data.Tree as Tree
@@ -38,13 +38,12 @@ import System.FilePath ( isExtensionOf )
 
 -- ghc
 import GHC.Iface.Ext.Binary ( HieFileResult( HieFileResult, hie_file_result ), readHieFileWithVersion )
-import GHC.Iface.Ext.Types ( HieFile(.. ), hieVersion, HieASTs (..) )
-import GHC.Iface.Ext.Utils ( generateReferencesMap, getEvidenceTree )
+import GHC.Iface.Ext.Types ( HieFile(.. ), hieVersion, HieASTs (..), EvVarSource (..), Scope (..) )
+import GHC.Iface.Ext.Utils ( generateReferencesMap, getEvidenceTree, EvidenceInfo (..) )
 import GHC.Unit.Module ( moduleName, moduleNameString )
 import GHC.Types.Name.Cache ( initNameCache, NameCache )
 import GHC.Types.Name ( occNameString )
 import GHC.Types.SrcLoc ( RealSrcLoc, realSrcSpanStart, srcLocLine )
-import GHC.Utils.Outputable ( Outputable(..), showSDocUnsafe )
 
 -- regex-tdfa
 import Text.Regex.TDFA ( (=~) )
@@ -137,7 +136,7 @@ mainWithConfig' hieExt hieDirectories requireHsFiles Config{ rootPatterns, typeC
     mapM ( readCompatibleHieFileOrExit nameCache ) hieFilePaths
 
   -- before considering evidence variables
-  analysis <-
+  initialAnalysis <-
     flip execStateT emptyAnalysis do
       for_ hieFileResults \hieFileResult -> do
         let hsFileExists = any ( hie_hs_file hieFileResult `isSuffixOf` ) hsFilePaths
@@ -149,27 +148,19 @@ mainWithConfig' hieExt hieDirectories requireHsFiles Config{ rootPatterns, typeC
 
     getEvidenceTrees = mapMaybe (getEvidenceTree (generateReferencesMap asts))
 
-    evidenceTreesMap = fmap getEvidenceTrees (requestedEvidence analysis)
-    
-    lastEvidenceLevel = fmap 
-      ( concat 
-      . mapMaybe 
-        ( listToMaybe 
-        . reverse 
-        . Tree.levels 
-        ) 
-      ) evidenceTreesMap
+    evidenceInfos = fmap (concatMap Tree.flatten . getEvidenceTrees) (requestedEvidence initialAnalysis)
 
-  for_ ( Map.keys lastEvidenceLevel ) \d -> do
-    hPrint stderr d
-    for_ ( lastEvidenceLevel!d ) \evidenceInfo -> do 
-      hPutStr stderr "\t"
-      let sdoc = ppr evidenceInfo
-      hPutStrLn stderr (showSDocUnsafe sdoc)
-      -- addDependency d (evidenceVar . nameToDeclaration $ evidenceInfo)
-      -- done?
-      -- also should filter for when evidenceDetails is either
-      -- Nothing or Just (_, ModuleScope, _)
+    instanceEvidenceInfos = 
+      evidenceInfos <&> filter \case 
+        EvidenceInfo _ _ _ (Just (EvInstBind _ _, ModuleScope, _)) -> True
+        _ -> False
+
+  analysis <- 
+    flip execStateT initialAnalysis do
+      for_ ( Map.toList instanceEvidenceInfos ) \(d, evs) -> do
+        for_ evs \ev -> do
+          let name = nameToDeclaration (evidenceVar ev)
+          mapM_ (addDependency d) name
 
   let
     roots =

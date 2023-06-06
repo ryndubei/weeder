@@ -22,6 +22,8 @@ module Weeder
 
     -- * Declarations
   , Declaration(..)
+  , addDependency
+  , nameToDeclaration
   )
    where
 
@@ -505,10 +507,3 @@ evidenceUseTree Node{ sourcedNodeInfo, nodeChildren } = Tree.Node
 requestEvidence :: MonadState Analysis m => HieAST a -> Declaration -> m () 
 requestEvidence n d = 
   #requestedEvidence %= Map.insertWith (<>) d ( concat $ Tree.flatten (evidenceUseTree n) )
-
-
--- | Specify that all evidence uses found in this node's own IdentifierDetails
--- should be followed to the binding and connected to the given declaration.
-requestEvidenceDirect :: MonadState Analysis m => HieAST a -> Declaration -> m ()
-requestEvidenceDirect n d = 
-  #requestedEvidence %= Map.insertWith (<>) d ( concat $ Tree.flatten (evidenceUseTree n){ Tree.subForest = []})
