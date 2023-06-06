@@ -146,9 +146,9 @@ data Analysis =
       -- ^ All exports for a given module.
     , modulePaths :: Map Module FilePath
       -- ^ A map from modules to the file path to the .hs file defining them.
-    , requestedEvidence :: Map Declaration [Tree [Name]]
-      -- ^ Map from declarations to trees of Names from which evidence
-      -- is to be followed back to the binding. 
+    , requestedEvidence :: Map Declaration [Name]
+      -- ^ Map from declarations to Names from which evidence is to be 
+      -- followed back to the binding. 
     }
   deriving
     ( Generic )
@@ -504,11 +504,11 @@ evidenceUseTree Node{ sourcedNodeInfo, nodeChildren } = Tree.Node
 -- followed to the binding and connected to the given declaration.
 requestEvidence :: MonadState Analysis m => HieAST a -> Declaration -> m () 
 requestEvidence n d = 
-  #requestedEvidence %= Map.insertWith (<>) d ( pure (evidenceUseTree n) )
+  #requestedEvidence %= Map.insertWith (<>) d ( concat $ Tree.flatten (evidenceUseTree n) )
 
 
 -- | Specify that all evidence uses found in this node's own IdentifierDetails
 -- should be followed to the binding and connected to the given declaration.
 requestEvidenceDirect :: MonadState Analysis m => HieAST a -> Declaration -> m ()
 requestEvidenceDirect n d = 
-  #requestedEvidence %= Map.insertWith (<>) d ( pure $ (evidenceUseTree n){ Tree.subForest = []})
+  #requestedEvidence %= Map.insertWith (<>) d ( concat $ Tree.flatten (evidenceUseTree n){ Tree.subForest = []})

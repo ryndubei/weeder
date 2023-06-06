@@ -149,11 +149,7 @@ mainWithConfig' hieExt hieDirectories requireHsFiles Config{ rootPatterns, typeC
 
     getEvidenceTrees = mapMaybe (getEvidenceTree (generateReferencesMap asts))
 
-    evidenceTreesMap = fmap 
-      ( getEvidenceTrees 
-      . concat 
-      . concatMap Tree.flatten 
-      ) (requestedEvidence analysis)
+    evidenceTreesMap = fmap getEvidenceTrees (requestedEvidence analysis)
     
     lastEvidenceLevel = fmap 
       ( concat 
