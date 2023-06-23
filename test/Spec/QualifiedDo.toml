@@ -1,0 +1,3 @@
+roots = [ "Spec.QualifiedDo.QualifiedDo.root" ]
+
+type-class-roots = false
