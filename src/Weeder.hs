@@ -66,18 +66,18 @@ import GHC.Iface.Ext.Types
   , EvVarSource (..)
   , HieAST( Node, nodeChildren, nodeSpan, sourcedNodeInfo )
   , HieASTs( HieASTs, getAsts )
-  , HieFile( HieFile, hie_asts, hie_exports, hie_module, hie_hs_file )
-  , IdentifierDetails( IdentifierDetails, identInfo )
+  , HieFile(..)
+  , IdentifierDetails(..)
   , NodeAnnotation( NodeAnnotation, nodeAnnotType )
   , NodeInfo( nodeIdentifiers, nodeAnnotations )
   , Scope( ModuleScope )
-  , getSourcedNodeInfo
+  , getSourcedNodeInfo, TypeIndex
   )
 import GHC.Iface.Ext.Utils
   ( EvidenceInfo( EvidenceInfo, evidenceVar )
   , findEvidenceUse
   , getEvidenceTree
-  , generateReferencesMap
+  , generateReferencesMap, recoverFullType, hieTypeToIface
   )
 import GHC.Unit.Module ( Module, moduleStableString )
 import GHC.Types.Name
@@ -100,6 +100,7 @@ import Control.Monad.State.Class ( MonadState, get )
 
 -- transformers
 import Control.Monad.Trans.Maybe ( runMaybeT )
+import GHC.Utils.Outputable ( showPprUnsafe )
 
 
 data Declaration =
@@ -174,7 +175,8 @@ data Root
   | -- | We store extra information for instances in order to be able
     -- to specify e.g. all instances of a class as roots.
     InstanceRoot Declaration
-      (Maybe RealSrcSpan) -- ^ Span containing the instance signature.
+      (Either TypeIndex String) -- ^ Type of the instance, converted to 'Right' at 
+                                -- the end of the analysis of each hie file
       OccName -- ^ Name of the parent class
   | -- | All exported declarations in a module are roots.
     ModuleRoot Module
@@ -203,14 +205,24 @@ allDeclarations Analysis{ dependencyGraph } =
 
 -- | Incrementally update 'Analysis' with information in a 'HieFile'.
 analyseHieFile :: MonadState Analysis m => HieFile -> m ()
-analyseHieFile HieFile{ hie_asts = HieASTs hieASTs, hie_exports, hie_module, hie_hs_file } = do
+analyseHieFile HieFile{ hie_asts = HieASTs hieASTs, hie_exports, hie_module, hie_hs_file, hie_types } = do
   #modulePaths %= Map.insert hie_module hie_hs_file
 
   for_ hieASTs \ast -> do
     addAllDeclarations ast
     topLevelAnalysis ast
 
+  lookupInstanceTypes
+
   for_ hie_exports ( analyseExport hie_module )
+
+  where
+
+    lookupInstanceTypes = do
+      #implicitRoots %= 
+        Set.map \case
+          InstanceRoot d (Left t) parent -> InstanceRoot d ( Right (showPprUnsafe . hieTypeToIface $ recoverFullType t hie_types) ) parent
+          r -> r
 
 
 -- | Incrementally update 'Analysis' with information in every 'HieFile'.
@@ -280,9 +292,9 @@ addImplicitRoot x =
   #implicitRoots %= Set.insert (DeclarationRoot x)
 
 
-addInstanceRoot :: MonadState Analysis m => Declaration -> Maybe RealSrcSpan -> Name -> m ()
-addInstanceRoot x loc cls =
-  #implicitRoots %= Set.insert (InstanceRoot x loc (nameOccName cls))
+addInstanceRoot :: MonadState Analysis m => Declaration -> TypeIndex -> Name -> m ()
+addInstanceRoot x t cls =
+  #implicitRoots %= Set.insert (InstanceRoot x (Left t) (nameOccName cls))
 
 
 define :: MonadState Analysis m => Declaration -> RealSrcSpan -> m ()
@@ -304,7 +316,7 @@ addAllDeclarations n = do
   for_ ( findIdentifiers ( const True ) n ) addDeclaration
 
 
-topLevelAnalysis :: MonadState Analysis m => HieAST a -> m ()
+topLevelAnalysis :: MonadState Analysis m => HieAST TypeIndex -> m ()
 topLevelAnalysis n@Node{ nodeChildren } = do
   analysed <-
     runMaybeT
@@ -351,11 +363,11 @@ analyseRewriteRule n@Node{ sourcedNodeInfo } = do
   for_ ( uses n ) addImplicitRoot
 
 
-analyseInstanceDeclaration :: ( Alternative m, MonadState Analysis m ) => HieAST a -> m ()
+analyseInstanceDeclaration :: ( Alternative m, MonadState Analysis m ) => HieAST TypeIndex -> m ()
 analyseInstanceDeclaration n@Node{ sourcedNodeInfo } = do
   guard $ any (Set.member ("ClsInstD", "InstDecl") . Set.map unNodeAnnotation . nodeAnnotations) $ getSourcedNodeInfo sourcedNodeInfo
 
-  for_ ( findEvInstBinds' n ) \(d, cs, ast) -> do
+  for_ ( findEvInstBinds n ) \(d, cs, ids, _) -> do
     -- This makes instance declarations show up in 
     -- the output if type-class-roots is set to False.
     define d (nodeSpan n)
@@ -364,7 +376,9 @@ analyseInstanceDeclaration n@Node{ sourcedNodeInfo } = do
 
     for_ ( uses n ) $ addDependency d
 
-    for_ cs (addInstanceRoot d (Just $ nodeSpan ast))
+    case identType ids of
+      Just t -> for_ cs (addInstanceRoot d t)
+      Nothing -> pure ()
 
 
 analyseClassDeclaration :: ( Alternative m, MonadState Analysis m ) => HieAST a -> m ()
@@ -389,7 +403,7 @@ analyseClassDeclaration n@Node{ nodeSpan, sourcedNodeInfo } = do
           False
 
 
-analyseDataDeclaration :: ( Alternative m, MonadState Analysis m ) => HieAST a -> m ()
+analyseDataDeclaration :: ( Alternative m, MonadState Analysis m ) => HieAST TypeIndex -> m ()
 analyseDataDeclaration n@Node{ sourcedNodeInfo } = do
   guard $ any (Set.member ("DataDecl", "TyClDecl") . Set.map unNodeAnnotation . nodeAnnotations) $ getSourcedNodeInfo sourcedNodeInfo
 
@@ -405,15 +419,16 @@ analyseDataDeclaration n@Node{ sourcedNodeInfo } = do
 
           for_ ( uses constructor ) ( addDependency conDec )
 
-  for_ ( derivedInstances n ) \(d, cs, ast) -> do
+  for_ ( derivedInstances n ) \(d, cs, ids, ast) -> do
     define d (nodeSpan ast)
 
     requestEvidence ast d
 
     for_ ( uses ast ) $ addDependency d
 
-    -- TODO: find a way to store the signature of a derived instance
-    for_ cs (addInstanceRoot d Nothing)
+    case identType ids of
+      Just t -> for_ cs (addInstanceRoot d t)
+      Nothing -> pure ()
 
   where
 
@@ -435,32 +450,29 @@ constructors n@Node{ nodeChildren, sourcedNodeInfo } =
     foldMap constructors nodeChildren
 
 
-derivedInstances :: HieAST a -> Seq (Declaration, Set Name, HieAST a)
+derivedInstances :: HieAST a -> Seq (Declaration, Set Name, IdentifierDetails a, HieAST a)
 derivedInstances n@Node{ nodeChildren, sourcedNodeInfo } =
   if any (Set.member ("HsDerivingClause", "HsDerivingClause") . Set.map unNodeAnnotation . nodeAnnotations) $ getSourcedNodeInfo sourcedNodeInfo
-    then findEvInstBinds' n
+    then findEvInstBinds n
 
   else
     foldMap derivedInstances nodeChildren
 
 
-analyseStandaloneDeriving :: (Alternative m, MonadState Analysis m) => HieAST a -> m ()
+analyseStandaloneDeriving :: (Alternative m, MonadState Analysis m) => HieAST TypeIndex -> m ()
 analyseStandaloneDeriving n = do
   guard $ any (Set.member ("DerivDecl", "DerivDecl") . Set.map unNodeAnnotation . nodeAnnotations) $ getSourcedNodeInfo (sourcedNodeInfo n)
 
-  for_ (findEvInstBinds' n) \(d, cs, Node{ nodeChildren }) -> do
+  for_ (findEvInstBinds n) \(d, cs, ids, _) -> do
     define d (nodeSpan n)
 
     requestEvidence n d
 
     for_ (uses n) $ addDependency d
 
-    -- HsSig for standalone deriving is not in the same node as the evidence,
-    -- so we look for it in nodeChildren
-    for_ cs \c ->
-      for_ nodeChildren \ast ->
-        when (any (Set.member ("HsSig", "HsSigType") . Set.map unNodeAnnotation . nodeAnnotations) $ getSourcedNodeInfo (sourcedNodeInfo ast)) $
-          addInstanceRoot d (Just $ nodeSpan ast) c
+    case identType ids of
+      Just t -> for_ cs (addInstanceRoot d t) 
+      Nothing -> pure ()
 
 
 analysePatternSynonyms :: ( Alternative m, MonadState Analysis m ) => HieAST a -> m ()
@@ -470,13 +482,14 @@ analysePatternSynonyms n@Node{ sourcedNodeInfo } = do
   for_ ( findDeclarations n ) $ for_ ( uses n ) . addDependency
 
 
-findEvInstBinds' :: HieAST a -> Seq (Declaration, Set Name, HieAST a)
-findEvInstBinds' n = (\(d, ids, ast) -> (d, getEvVarSourceNames ids, ast)) <$>
+findEvInstBinds :: HieAST a -> Seq (Declaration, Set Name, IdentifierDetails a, HieAST a)
+findEvInstBinds n = (\(d, ids, ast) -> (d, getClassNames ids, ids, ast)) <$>
   findIdentifiers'
     (   not
       . Set.null
       . getEvVarSources
     ) n
+
   where
 
     getEvVarSources :: Set ContextInfo -> Set EvVarSource
@@ -485,8 +498,8 @@ findEvInstBinds' n = (\(d, ids, ast) -> (d, getEvVarSourceNames ids, ast)) <$>
         EvidenceVarBind a@EvInstBind{} ModuleScope _ -> Just a
         _ -> Nothing
 
-    getEvVarSourceNames :: IdentifierDetails a -> Set Name
-    getEvVarSourceNames =
+    getClassNames :: IdentifierDetails a -> Set Name
+    getClassNames =
       Set.map cls
       . getEvVarSources
       . identInfo
