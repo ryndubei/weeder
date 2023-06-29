@@ -100,7 +100,8 @@ import Control.Monad.State.Class ( MonadState, get )
 
 -- transformers
 import Control.Monad.Trans.Maybe ( runMaybeT )
-import GHC.Utils.Outputable ( showPprUnsafe )
+import GHC.Utils.Outputable ( defaultSDocContext, showSDocOneLine )
+import GHC.Iface.Type (pprIfaceSigmaType, ShowForAllFlag (ShowForAllWhen))
 
 
 data Declaration =
@@ -221,8 +222,10 @@ analyseHieFile HieFile{ hie_asts = HieASTs hieASTs, hie_exports, hie_module, hie
     lookupInstanceTypes = do
       #implicitRoots %= 
         Set.map \case
-          InstanceRoot d (Left t) parent -> InstanceRoot d ( Right (showPprUnsafe . hieTypeToIface $ recoverFullType t hie_types) ) parent
+          InstanceRoot d (Left t) parent -> InstanceRoot d ( Right (renderType $ recoverFullType t hie_types) ) parent
           r -> r
+    
+    renderType = showSDocOneLine defaultSDocContext . pprIfaceSigmaType ShowForAllWhen . hieTypeToIface
 
 
 -- | Incrementally update 'Analysis' with information in every 'HieFile'.
