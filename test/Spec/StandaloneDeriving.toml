@@ -1,3 +1,3 @@
-roots = [ "Spec.StandaloneDeriving.StandaloneDeriving.T" ]
+roots = [ "Spec.StandaloneDeriving.StandaloneDeriving.root" ]
 
 type-class-roots = false
