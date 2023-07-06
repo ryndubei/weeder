@@ -8,10 +8,12 @@
 {-# language OverloadedLabels #-}
 {-# language OverloadedStrings #-}
 {-# language TupleSections #-}
+{-# language GeneralisedNewtypeDeriving #-}
 
 module Weeder
   ( -- * Analysis
     Analysis(..)
+  , AnalysisLog(unLog)
   , analyseHieFiles
   , emptyAnalysis
   , allDeclarations
@@ -31,10 +33,10 @@ import Algebra.Graph.ToGraph ( dfs )
 
 -- base
 import Control.Applicative ( Alternative )
-import Control.Monad ( guard, msum, when )
+import Control.Monad ( guard, msum, when, unless )
 import Data.Maybe ( mapMaybe )
 import Data.Foldable ( for_, traverse_ )
-import Data.Functor ( (<&>) )
+import Data.Function ((&))
 import Data.List ( intercalate )
 import Data.Monoid ( First( First ) )
 import GHC.Generics ( Generic )
@@ -76,13 +78,14 @@ import GHC.Iface.Ext.Types
   )
 import GHC.Iface.Ext.Utils
   ( EvidenceInfo( EvidenceInfo, evidenceVar )
+  , RefMap
   , findEvidenceUse
   , getEvidenceTree
   , generateReferencesMap
   , hieTypeToIface
   , recoverFullType
   )
-import GHC.Unit.Module ( Module, moduleStableString )
+import GHC.Unit.Module ( Module, moduleStableString, moduleName )
 import GHC.Utils.Outputable ( defaultSDocContext, showSDocOneLine )
 import GHC.Iface.Type ( ShowForAllFlag (ShowForAllWhen), pprIfaceSigmaType )
 import GHC.Types.Name
@@ -101,10 +104,14 @@ import GHC.Types.SrcLoc ( RealSrcSpan, realSrcSpanEnd, realSrcSpanStart )
 import Control.Lens ( (%=) )
 
 -- mtl
-import Control.Monad.State.Class ( MonadState, get, gets )
+import Control.Monad.RWS.Class
 
 -- transformers
 import Control.Monad.Trans.Maybe ( runMaybeT )
+import Control.Monad.Trans.Reader ( runReaderT )
+
+-- weeder
+import Weeder.Config (Config (..))
 
 
 data Declaration =
@@ -159,9 +166,6 @@ data Analysis =
       -- ^ All exports for a given module.
     , modulePaths :: Map Module FilePath
       -- ^ A map from modules to the file path to the .hs file defining them.
-    , requestedEvidence :: Map Declaration [Name]
-      -- ^ Map from declarations to Names from which evidence is to be 
-      -- followed back to the binding. 
     , prettyPrintedType :: Map Declaration String
       -- ^ Used to match against the types of instances and to replace the
       -- appearance of declarations in the output
@@ -170,9 +174,27 @@ data Analysis =
     ( Generic )
 
 
+-- | Module-specific information for analysis
+data AnalysisInfo = AnalysisInfo
+  { weederConfig :: Config
+  , currentHieFile :: HieFile
+      -- ^ The current HieFile being analysed
+  , refMap :: RefMap TypeIndex
+  }
+
+
+newtype AnalysisLog = AnalysisLog { unLog :: Seq String }
+  deriving 
+    ( Semigroup, Monoid )
+
+
+tellS :: MonadWriter AnalysisLog m => String -> m ()
+tellS = tell . AnalysisLog . pure
+
+
 -- | The empty analysis - the result of analysing zero @.hie@ files.
 emptyAnalysis :: Analysis
-emptyAnalysis = Analysis empty mempty mempty mempty mempty mempty mempty
+emptyAnalysis = Analysis empty mempty mempty mempty mempty mempty
 
 
 -- | A root for reachability analysis.
@@ -182,7 +204,6 @@ data Root
   | -- | We store extra information for instances in order to be able
     -- to specify e.g. all instances of a class as roots.
     InstanceRoot Declaration
-      (Maybe TypeIndex) -- ^ Type of the instance, set to Nothing when no longer relevant
       OccName -- ^ Name of the parent class
   | -- | All exported declarations in a module are roots.
     ModuleRoot Module
@@ -199,7 +220,7 @@ reachable Analysis{ dependencyGraph, exports } roots =
 
     rootDeclarations = \case
       DeclarationRoot d -> [ d ]
-      InstanceRoot d _ _ -> [ d ] -- filter InstanceRoots in `Main.hs`
+      InstanceRoot d _ -> [ d ] -- filter InstanceRoots in `Main.hs`
       ModuleRoot m -> foldMap Set.toList ( Map.lookup m exports )
 
 
@@ -210,63 +231,44 @@ allDeclarations Analysis{ dependencyGraph } =
 
 
 -- | Incrementally update 'Analysis' with information in a 'HieFile'.
-analyseHieFile :: MonadState Analysis m => HieFile -> m ()
-analyseHieFile HieFile{ hie_asts = HieASTs hieASTs, hie_exports, hie_module, hie_hs_file, hie_types } = do
+analyseHieFile :: (MonadReader AnalysisInfo m, MonadWriter AnalysisLog m, MonadState Analysis m) => m ()
+analyseHieFile = do
+  HieFile{hie_module, hie_hs_file, hie_asts = HieASTs hieASTs, hie_exports} <- asks currentHieFile
+  tellS $ "Analysing " <> (show . moduleName) hie_module <> " from " <> hie_hs_file
+
   #modulePaths %= Map.insert hie_module hie_hs_file
 
   for_ hieASTs \ast -> do
     addAllDeclarations ast
     topLevelAnalysis ast
 
-  lookupInstanceTypes
-
   for_ hie_exports ( analyseExport hie_module )
+
+
+lookupPprType :: MonadReader AnalysisInfo m => TypeIndex -> m String
+lookupPprType t = do
+  HieFile{hie_types} <- asks currentHieFile
+  pure . renderType $ recoverFullType t hie_types
 
   where
 
-    lookupInstanceTypes = do
-      roots <- gets implicitRoots
-      for_ roots \case
-        InstanceRoot d (Just t) _ -> #prettyPrintedType %= Map.insert d ( renderType $ recoverFullType t hie_types )
-        _ -> pure ()
-      -- To avoid going over the same roots again in other modules:
-      #implicitRoots %= Set.map \case
-        InstanceRoot d _ parent -> InstanceRoot d Nothing parent
-        r -> r
-    
     renderType = showSDocOneLine defaultSDocContext . pprIfaceSigmaType ShowForAllWhen . hieTypeToIface
 
 
 -- | Incrementally update 'Analysis' with information in every 'HieFile'.
-analyseHieFiles :: (Foldable f, MonadState Analysis m) => f HieFile -> m ()
+analyseHieFiles :: (Foldable f, MonadRWS Config AnalysisLog Analysis m) => f HieFile -> m ()
 analyseHieFiles hieFiles = do
-  traverse_ analyseHieFile hieFiles
+  flags <- ask
 
-  let asts = concatMap (Map.elems . getAsts . hie_asts) hieFiles
-
-  analyseEvidence asts
-
-
--- | Follow evidence usages back to their type class instance bindings and connect
--- them to declarations as per the @requestEvidence@ field of @Analysis@. Applied 
--- after @analyseHieFile@ and takes HieASTs from every HieFile used at once.
-analyseEvidence :: (Foldable f, MonadState Analysis m) => f (HieAST a) -> m ()
-analyseEvidence asts = do
-  analysis <- get
-
-  let evidenceInfos = fmap (concatMap Tree.flatten . getEvidenceTrees) (requestedEvidence analysis)
-      instanceEvidenceInfos = evidenceInfos <&> filter \case 
-        EvidenceInfo _ _ _ (Just (EvInstBind _ _, ModuleScope, _)) -> True
-        _ -> False
-
-  for_ ( Map.toList instanceEvidenceInfos ) \(d, evs) -> do
-    for_ evs \ev -> do
-      let name = nameToDeclaration (evidenceVar ev)
-      mapM_ (addDependency d) name
+  for_ hieFiles \hf ->
+    let info = AnalysisInfo flags hf rf
+     in runReaderT analyseHieFile info
 
   where
-    
-    getEvidenceTrees = mapMaybe (getEvidenceTree (generateReferencesMap asts))
+
+    asts = concatMap (Map.elems . getAsts . hie_asts) hieFiles
+
+    rf = generateReferencesMap asts
 
 
 analyseExport :: MonadState Analysis m => Module -> AvailInfo -> m ()
@@ -304,9 +306,13 @@ addImplicitRoot x =
   #implicitRoots %= Set.insert (DeclarationRoot x)
 
 
-addInstanceRoot :: MonadState Analysis m => Declaration -> TypeIndex -> Name -> m ()
-addInstanceRoot x t cls =
-  #implicitRoots %= Set.insert (InstanceRoot x (Just t) (nameOccName cls))
+addInstanceRoot :: (MonadState Analysis m, MonadReader AnalysisInfo m) => Declaration -> TypeIndex -> Name -> m ()
+addInstanceRoot x t cls = do
+  #implicitRoots %= Set.insert (InstanceRoot x (nameOccName cls))
+  -- NOTE: we could generalise @TypeIndex@ to @a@ and @Analysis@ 
+  -- to @Analysis a@ and do the step of constructing the string in @Main.hs@
+  str <- lookupPprType t 
+  #prettyPrintedType %= Map.insert x str
 
 
 define :: MonadState Analysis m => Declaration -> RealSrcSpan -> m ()
@@ -328,7 +334,7 @@ addAllDeclarations n = do
   for_ ( findIdentifiers ( const True ) n ) addDeclaration
 
 
-topLevelAnalysis :: MonadState Analysis m => HieAST TypeIndex -> m ()
+topLevelAnalysis :: (MonadReader AnalysisInfo m, MonadState Analysis m) => HieAST TypeIndex -> m ()
 topLevelAnalysis n@Node{ nodeChildren } = do
   analysed <-
     runMaybeT
@@ -355,7 +361,7 @@ topLevelAnalysis n@Node{ nodeChildren } = do
       return ()
 
 
-analyseBinding :: ( Alternative m, MonadState Analysis m ) => HieAST a -> m ()
+analyseBinding :: ( Alternative m, MonadState Analysis m, MonadReader AnalysisInfo m ) => HieAST a -> m ()
 analyseBinding n@Node{ nodeSpan, sourcedNodeInfo } = do
   let bindAnns = Set.fromList [("FunBind", "HsBindLR"), ("PatBind", "HsBindLR")]
   guard $ any (not . Set.disjoint bindAnns . Set.map unNodeAnnotation . nodeAnnotations) $ getSourcedNodeInfo sourcedNodeInfo
@@ -363,7 +369,7 @@ analyseBinding n@Node{ nodeSpan, sourcedNodeInfo } = do
   for_ ( findDeclarations n ) \d -> do
     define d nodeSpan
 
-    requestEvidence n d
+    connectEvidenceUses n d
 
     for_ ( uses n ) $ addDependency d
 
@@ -375,7 +381,7 @@ analyseRewriteRule n@Node{ sourcedNodeInfo } = do
   for_ ( uses n ) addImplicitRoot
 
 
-analyseInstanceDeclaration :: ( Alternative m, MonadState Analysis m ) => HieAST TypeIndex -> m ()
+analyseInstanceDeclaration :: ( Alternative m, MonadState Analysis m, MonadReader AnalysisInfo m) => HieAST TypeIndex -> m ()
 analyseInstanceDeclaration n@Node{ nodeSpan, sourcedNodeInfo } = do
   guard $ any (Set.member ("ClsInstD", "InstDecl") . Set.map unNodeAnnotation . nodeAnnotations) $ getSourcedNodeInfo sourcedNodeInfo
 
@@ -384,7 +390,7 @@ analyseInstanceDeclaration n@Node{ nodeSpan, sourcedNodeInfo } = do
     -- the output if type-class-roots is set to False.
     define d nodeSpan
 
-    requestEvidence n d
+    connectEvidenceUses n d
 
     for_ ( uses n ) $ addDependency d
 
@@ -393,14 +399,14 @@ analyseInstanceDeclaration n@Node{ nodeSpan, sourcedNodeInfo } = do
       Nothing -> pure ()
 
 
-analyseClassDeclaration :: ( Alternative m, MonadState Analysis m ) => HieAST a -> m ()
+analyseClassDeclaration :: ( Alternative m, MonadState Analysis m, MonadReader AnalysisInfo m ) => HieAST a -> m ()
 analyseClassDeclaration n@Node{ nodeSpan, sourcedNodeInfo } = do
   guard $ any (Set.member ("ClassDecl", "TyClDecl") . Set.map unNodeAnnotation . nodeAnnotations) $ getSourcedNodeInfo sourcedNodeInfo
 
   for_ ( findIdentifiers isClassDeclaration n ) $ \d -> do
     define d nodeSpan
 
-    requestEvidence n d
+    connectEvidenceUses n d
 
     (for_ ( findIdentifiers ( const True ) n ) . addDependency) d
 
@@ -415,7 +421,7 @@ analyseClassDeclaration n@Node{ nodeSpan, sourcedNodeInfo } = do
           False
 
 
-analyseDataDeclaration :: ( Alternative m, MonadState Analysis m ) => HieAST TypeIndex -> m ()
+analyseDataDeclaration :: ( Alternative m, MonadState Analysis m, MonadReader AnalysisInfo m ) => HieAST TypeIndex -> m ()
 analyseDataDeclaration n@Node{ sourcedNodeInfo } = do
   guard $ any (Set.member ("DataDecl", "TyClDecl") . Set.map unNodeAnnotation . nodeAnnotations) $ getSourcedNodeInfo sourcedNodeInfo
 
@@ -434,7 +440,7 @@ analyseDataDeclaration n@Node{ sourcedNodeInfo } = do
   for_ ( derivedInstances n ) \(d, cs, ids, ast) -> do
     define d (nodeSpan ast)
 
-    requestEvidence ast d
+    connectEvidenceUses ast d
 
     for_ ( uses ast ) $ addDependency d
 
@@ -471,14 +477,14 @@ derivedInstances n@Node{ nodeChildren, sourcedNodeInfo } =
     foldMap derivedInstances nodeChildren
 
 
-analyseStandaloneDeriving :: (Alternative m, MonadState Analysis m) => HieAST TypeIndex -> m ()
+analyseStandaloneDeriving :: (Alternative m, MonadState Analysis m, MonadReader AnalysisInfo m) => HieAST TypeIndex -> m ()
 analyseStandaloneDeriving n@Node{ nodeSpan, sourcedNodeInfo } = do
   guard $ any (Set.member ("DerivDecl", "DerivDecl") . Set.map unNodeAnnotation . nodeAnnotations) $ getSourcedNodeInfo sourcedNodeInfo
 
   for_ (findEvInstBinds n) \(d, cs, ids, _) -> do
     define d nodeSpan
 
-    requestEvidence n d
+    connectEvidenceUses n d
 
     for_ (uses n) $ addDependency d
 
@@ -589,8 +595,25 @@ evidenceUseTree Node{ sourcedNodeInfo, nodeChildren } = Tree.Node
   }
 
 
--- | Specify that all evidence uses found anywhere under this node should be
--- followed to the binding and connected to the given declaration.
-requestEvidence :: MonadState Analysis m => HieAST a -> Declaration -> m ()
-requestEvidence n d =
-  #requestedEvidence %= Map.insertWith (<>) d ( concat $ Tree.flatten (evidenceUseTree n) )
+-- | Find all evidence uses under this node and connect the declaration to
+-- their instance binding sites.
+connectEvidenceUses :: (MonadReader AnalysisInfo m, MonadState Analysis m) => HieAST a -> Declaration -> m ()
+connectEvidenceUses n d = do
+  noEvidence <- asks (typeClassRoots . weederConfig)
+  rf <- asks refMap
+
+  let getEvidenceTrees = mapMaybe (getEvidenceTree rf)
+      evidenceInfos = concatMap Tree.flatten (getEvidenceTrees names)
+      instanceEvidenceInfos = evidenceInfos & filter \case
+        EvidenceInfo _ _ _ (Just (EvInstBind _ _, ModuleScope, _)) -> True
+        _ -> False
+
+  -- if type-class-roots flag is set then we don't need to follow evidence uses as the
+  -- binding sites will be roots anyway
+  unless noEvidence $ for_ instanceEvidenceInfos \ev -> do
+    let name = nameToDeclaration (evidenceVar ev)
+    mapM_ (addDependency d) name
+
+  where
+
+    names = concat $ Tree.flatten (evidenceUseTree n)
