@@ -12,13 +12,15 @@ data Modulo2 = Zero' | One'
 
 type Number = Modulo2
 
-newtype Vector a = Vector (a, a, a) deriving (Functor)
+newtype Vector a = MkVector (a, a, a) deriving (Functor)
 
-data Record = Record
+data Record = MkRecord
   { recordField1 :: Int
   , recordField2 :: Double
   }
 
+data T = MkT
+
 type family Family a
 
-type instance Family Int = Record
+type instance Family Int = T

@@ -19,6 +19,6 @@ notRoot = modulo1Usage
 recordUsage = recordField1
 
 vectorUsage = mapVector (const (0 :: Integer))
-
-mapVector :: (a -> b) -> Vector a -> Vector b
-mapVector = fmap
+  where
+    mapVector :: (b -> c) -> Vector b -> Vector c
+    mapVector = fmap
