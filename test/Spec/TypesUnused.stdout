@@ -1,0 +1,5 @@
+test/Spec/Types/TypesUnused.hs:6: Modulo1
+test/Spec/Types/TypesUnused.hs:8: Number
+test/Spec/Types/TypesUnused.hs:10: Vector
+test/Spec/Types/TypesUnused.hs:12: Family
+test/Spec/Types/TypesUnused.hs:12: Family Int

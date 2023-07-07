@@ -1,7 +1,7 @@
 {-# LANGUAGE TypeFamilies #-}
 -- | Control version of Types that is not imported
 -- All these declarations should show up in the output
-module Spec.Types.TypesUnused where
+module Spec.TypesUnused.TypesUnused where
 
 data Modulo1 = Zero
 
