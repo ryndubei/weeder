@@ -405,7 +405,7 @@ topLevelAnalysis n@Node{ nodeChildren } = do
       return ()
 
 
-analyseBinding :: ( Alternative m, MonadState Analysis m, MonadReader AnalysisInfo m ) => HieAST a -> m ()
+analyseBinding :: ( Alternative m, MonadState Analysis m, MonadReader AnalysisInfo m ) => HieAST TypeIndex -> m ()
 analyseBinding n@Node{ nodeSpan, sourcedNodeInfo } = do
   let bindAnns = Set.fromList [("FunBind", "HsBindLR"), ("PatBind", "HsBindLR")]
   guard $ any (not . Set.disjoint bindAnns . Set.map unNodeAnnotation . nodeAnnotations) $ getSourcedNodeInfo sourcedNodeInfo
@@ -434,6 +434,8 @@ analyseInstanceDeclaration n@Node{ nodeSpan, sourcedNodeInfo } = do
     -- the output if type-class-roots is set to False.
     define d nodeSpan
 
+    connectToUsedTypes n d
+
     followEvidenceUses n d
 
     for_ ( uses n ) $ addDependency d
@@ -443,12 +445,14 @@ analyseInstanceDeclaration n@Node{ nodeSpan, sourcedNodeInfo } = do
       Nothing -> pure ()
 
 
-analyseClassDeclaration :: ( Alternative m, MonadState Analysis m, MonadReader AnalysisInfo m ) => HieAST a -> m ()
+analyseClassDeclaration :: ( Alternative m, MonadState Analysis m, MonadReader AnalysisInfo m ) => HieAST TypeIndex -> m ()
 analyseClassDeclaration n@Node{ nodeSpan, sourcedNodeInfo } = do
   guard $ any (Set.member ("ClassDecl", "TyClDecl") . Set.map unNodeAnnotation . nodeAnnotations) $ getSourcedNodeInfo sourcedNodeInfo
 
   for_ ( findIdentifiers isClassDeclaration n ) $ \d -> do
     define d nodeSpan
+
+    connectToUsedTypes n d
 
     followEvidenceUses n d
 
@@ -529,6 +533,7 @@ derivedInstances :: HieAST a -> Seq (Declaration, Set Name, IdentifierDetails a,
 derivedInstances n = findNodeTypes "HsDerivingClause" n >>= findEvInstBinds
 
 
+-- | Find nodes such that any of the type annotations match the given string.
 findNodeTypes :: String -> HieAST a -> Seq ( HieAST a )
 findNodeTypes t n@Node{ nodeChildren, sourcedNodeInfo } =
   if any (any ( (t ==) . unpackFS . nodeAnnotType) . nodeAnnotations) (getSourcedNodeInfo sourcedNodeInfo) then
@@ -638,17 +643,16 @@ uses =
     foldMap Set.singleton
   . findIdentifiers (any isUse)
 
-  where
 
-    isUse :: ContextInfo -> Bool
-    isUse = \case
-      Use -> True
-      -- not RecFieldMatch and RecFieldDecl because they occur under
-      -- data declarations, which we do not want to add as dependencies
-      -- because that would make the graph no longer acyclic
-      -- RecFieldAssign will be most likely accompanied by the constructor
-      RecField RecFieldOcc _ -> True
-      _ -> False
+isUse :: ContextInfo -> Bool
+isUse = \case
+  Use -> True
+  -- not RecFieldMatch and RecFieldDecl because they occur under
+  -- data declarations, which we do not want to add as dependencies
+  -- because that would make the graph no longer acyclic
+  -- RecFieldAssign will be most likely accompanied by the constructor
+  RecField RecFieldOcc _ -> True
+  _ -> False
 
 
 nameToDeclaration :: Name -> Maybe Declaration
