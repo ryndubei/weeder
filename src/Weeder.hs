@@ -72,7 +72,7 @@ import GHC.Iface.Ext.Types
   , HieTypeFix(Roll)
   , IdentifierDetails( IdentifierDetails, identInfo, identType )
   , NodeAnnotation( NodeAnnotation, nodeAnnotType )
-  , NodeInfo( nodeIdentifiers, nodeAnnotations, nodeType )
+  , NodeInfo( nodeIdentifiers, nodeAnnotations )
   , Scope( ModuleScope )
   , RecFieldContext ( RecFieldOcc, RecFieldDecl )
   , TypeIndex
@@ -86,7 +86,6 @@ import GHC.Iface.Ext.Utils
   , generateReferencesMap
   , hieTypeToIface
   , recoverFullType
-  , flattenAst
   )
 import GHC.Unit.Module ( Module, moduleStableString )
 import GHC.Utils.Outputable ( defaultSDocContext, showSDocOneLine )
@@ -280,23 +279,6 @@ typeToNames (Roll t) = case t of
     hieArgsTypes = foldMap (typeToNames . snd)
 
 
-connectToUsedTypes :: (MonadState Analysis m, MonadReader AnalysisInfo m) => HieAST TypeIndex -> Declaration -> m ()
-connectToUsedTypes n d = do
-  -- Idea: could limit this only to types of Identifiers with a Use marker
-  -- (we can get that from findIdentifiers' (any isUse) and the type will be found in
-  -- the IdentifierDetails)
-  -- and the current node n, since that may be forced via type signatures
-  for_ (map astTypes $ flattenAst n) \types -> do
-    names <- Set.unions . map typeToNames <$> mapM lookupType types
-    let ds = Set.map nameToDeclaration names
-    traverse_ (traverse_ (addDependency d)) ds
-
-  where
-
-    astTypes Node{ sourcedNodeInfo } = 
-      concatMap nodeType . Map.elems $ getSourcedNodeInfo sourcedNodeInfo
-
-
 -- | Incrementally update 'Analysis' with information in every 'HieFile'.
 analyseHieFiles :: (Foldable f, MonadState Analysis m) => Config -> f HieFile -> m ()
 analyseHieFiles weederConfig hieFiles = do
@@ -371,9 +353,16 @@ addDeclaration decl =
 
 -- | Try and add vertices for all declarations in an AST - both
 -- those declared here, and those referred to from here.
-addAllDeclarations :: ( MonadState Analysis m ) => HieAST a -> m ()
+addAllDeclarations :: ( MonadState Analysis m, MonadReader AnalysisInfo m ) => HieAST TypeIndex -> m ()
 addAllDeclarations n = do
-  for_ ( findIdentifiers ( const True ) n ) addDeclaration
+  for_ ( findIdentifiers' ( const True ) n ) \(d, ids, _) -> do
+    addDeclaration d
+    case identType ids of
+      Just t -> do
+        hieType <- lookupType t
+        let names = typeToNames hieType
+        traverse_ (traverse_ (addDependency d) . nameToDeclaration) names
+      Nothing -> pure ()
 
 
 topLevelAnalysis :: ( MonadState Analysis m, MonadReader AnalysisInfo m ) => HieAST TypeIndex -> m ()
