@@ -1,5 +1,5 @@
 import qualified Weeder.Main
-import qualified Weeder
+import qualified Weeder.Types
 import qualified TOML
 
 import Algebra.Graph.Export.Dot
@@ -80,8 +80,8 @@ integrationTestOutput hieDirectory = hCapture_ [stdout] $ do
     TOML.decodeFile configExpr
       >>= either throwIO pure
       >>= Weeder.Main.mainWithConfig ".hie" [hieDirectory] True
-  let graph = Weeder.dependencyGraph analysis
-      graph' = export (defaultStyle (occNameString . Weeder.declOccName)) graph
+  let graph = Weeder.Types.dependencyGraph analysis
+      graph' = export (defaultStyle (occNameString . Weeder.Types.declOccName)) graph
   handle (\e -> hPrint stderr (e :: IOException)) $
     writeFile (hieDirectory <.> ".dot") graph'
   where

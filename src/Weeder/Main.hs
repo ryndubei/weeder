@@ -53,6 +53,7 @@ import Control.Monad.Trans.State.Strict ( execStateT )
 -- weeder
 import Weeder
 import Weeder.Config
+import Weeder.Types
 import Paths_weeder (version)
 
 

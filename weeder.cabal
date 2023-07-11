@@ -42,6 +42,7 @@ library
     Weeder
     Weeder.Config
     Weeder.Main
+    Weeder.Types
   autogen-modules:
     Paths_weeder
   other-modules:
