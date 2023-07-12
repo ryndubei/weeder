@@ -89,7 +89,12 @@ import GHC.Iface.Ext.Utils
   )
 import GHC.Unit.Module ( Module, moduleStableString )
 import GHC.Utils.Outputable ( defaultSDocContext, showSDocOneLine )
-import GHC.Iface.Type ( ShowForAllFlag (ShowForAllWhen), pprIfaceSigmaType, IfaceTyCon (IfaceTyCon, ifaceTyConName) )
+import GHC.Iface.Type 
+  ( ShowForAllFlag (ShowForAllWhen)
+  , pprIfaceSigmaType
+  , IfaceTyCon (IfaceTyCon, ifaceTyConName)
+  , ArgFlag (Required) 
+  )
 import GHC.Types.Name
   ( Name, nameModule_maybe, nameOccName
   , OccName
@@ -259,11 +264,13 @@ typeToNames (Roll t) = case t of
   HTyConApp (IfaceTyCon{ifaceTyConName}) (HieArgs args) ->
     Set.singleton ifaceTyConName <> hieArgsTypes args
 
-  HForAllTy ((n, a), _) b -> 
+  HForAllTy ((n, a), Required) b ->
     Set.singleton n <> typeToNames a <> typeToNames b
 
-  HFunTy a b c -> 
-    typeToNames a <> typeToNames b <> typeToNames c
+  HForAllTy _ _ -> mempty
+
+  HFunTy _mult b c -> 
+    typeToNames b <> typeToNames c
 
   HQualTy a b -> 
     typeToNames a <> typeToNames b
@@ -276,7 +283,8 @@ typeToNames (Roll t) = case t of
 
   where
 
-    hieArgsTypes = foldMap (typeToNames . snd)
+    hieArgsTypes :: [(Bool, HieTypeFix)] -> Set Name
+    hieArgsTypes = foldMap (typeToNames . snd) . filter fst
 
 
 -- | Incrementally update 'Analysis' with information in every 'HieFile'.
@@ -355,14 +363,15 @@ addDeclaration decl =
 -- those declared here, and those referred to from here.
 addAllDeclarations :: ( MonadState Analysis m, MonadReader AnalysisInfo m ) => HieAST TypeIndex -> m ()
 addAllDeclarations n = do
-  for_ ( findIdentifiers' ( const True ) n ) \(d, ids, _) -> do
-    addDeclaration d
-    case identType ids of
-      Just t -> do
-        hieType <- lookupType t
-        let names = typeToNames hieType
-        traverse_ (traverse_ (addDependency d) . nameToDeclaration) names
-      Nothing -> pure ()
+  for_ ( findIdentifiers' ( const True ) n ) 
+    \(d, IdentifierDetails{ identType }, _) -> do
+      addDeclaration d
+      case identType of
+        Just t -> do
+          hieType <- lookupType t
+          let names = typeToNames hieType
+          traverse_ (traverse_ (addDependency d) . nameToDeclaration) names
+        Nothing -> pure ()
 
 
 topLevelAnalysis :: ( MonadState Analysis m, MonadReader AnalysisInfo m ) => HieAST TypeIndex -> m ()
