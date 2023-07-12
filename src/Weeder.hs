@@ -93,7 +93,6 @@ import GHC.Iface.Type
   ( ShowForAllFlag (ShowForAllWhen)
   , pprIfaceSigmaType
   , IfaceTyCon (IfaceTyCon, ifaceTyConName)
-  , ArgFlag (Required) 
   )
 import GHC.Types.Name
   ( Name, nameModule_maybe, nameOccName
@@ -264,10 +263,7 @@ typeToNames (Roll t) = case t of
   HTyConApp (IfaceTyCon{ifaceTyConName}) (HieArgs args) ->
     Set.singleton ifaceTyConName <> hieArgsTypes args
 
-  HForAllTy ((n, a), Required) b ->
-    Set.singleton n <> typeToNames a <> typeToNames b
-
-  HForAllTy _ _ -> mempty
+  HForAllTy _ b -> typeToNames b
 
   HFunTy _mult b c -> 
     typeToNames b <> typeToNames c
