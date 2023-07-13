@@ -523,19 +523,19 @@ analyseDataDeclaration n = do
       _                       -> False
 
 
-constructors :: HieAST a -> Seq ( HieAST a )
+constructors :: HieAST a -> [HieAST a]
 constructors = findNodeTypes "ConDecl"
 
 
-recFieldDecls :: HieAST a -> Seq ( HieAST a )
+recFieldDecls :: HieAST a -> [HieAST a]
 recFieldDecls = findNodeTypes "ConDeclField"
 
 
-derivedInstances :: HieAST a -> Seq (Declaration, Set Name, IdentifierDetails a, HieAST a)
+derivedInstances :: HieAST a -> [(Declaration, Set Name, IdentifierDetails a, HieAST a)]
 derivedInstances n = findNodeTypes "HsDerivingClause" n >>= findEvInstBinds
 
 
-findNodeTypes :: String -> HieAST a -> Seq ( HieAST a )
+findNodeTypes :: String -> HieAST a -> [HieAST a]
 findNodeTypes t n@Node{ nodeChildren, sourcedNodeInfo } =
   if any (any ( (t ==) . unpackFS . nodeAnnotType) . nodeAnnotations) (getSourcedNodeInfo sourcedNodeInfo) then
     pure n
@@ -608,7 +608,7 @@ analysePatternSynonyms n = do
   for_ ( findDeclarations n ) $ for_ ( uses n ) . addDependency
 
 
-findEvInstBinds :: HieAST a -> Seq (Declaration, Set Name, IdentifierDetails a, HieAST a)
+findEvInstBinds :: HieAST a -> [(Declaration, Set Name, IdentifierDetails a, HieAST a)]
 findEvInstBinds n = (\(d, ids, ast) -> (d, getClassNames ids, ids, ast)) <$>
   findIdentifiers'
     (   not
@@ -631,7 +631,7 @@ findEvInstBinds n = (\(d, ids, ast) -> (d, getClassNames ids, ids, ast)) <$>
       . identInfo
 
 
-findDeclarations :: HieAST a -> Seq Declaration
+findDeclarations :: HieAST a -> [Declaration]
 findDeclarations =
   findIdentifiers
     (   not
@@ -652,7 +652,7 @@ findDeclarations =
 findIdentifiers
   :: ( Set ContextInfo -> Bool )
   -> HieAST a
-  -> Seq Declaration
+  -> [Declaration]
 findIdentifiers f = fmap (\(d, _, _) -> d) . findIdentifiers' f
 
 
@@ -662,22 +662,19 @@ findIdentifiers f = fmap (\(d, _, _) -> d) . findIdentifiers' f
 findIdentifiers'
   :: ( Set ContextInfo -> Bool )
   -> HieAST a
-  -> Seq (Declaration, IdentifierDetails a, HieAST a)
-findIdentifiers' f n@Node{ sourcedNodeInfo, nodeChildren } =
-     foldMap
-       (\case
-           ( Left _, _ ) ->
-             mempty
+  -> [(Declaration, IdentifierDetails a, HieAST a)]
+findIdentifiers' f n = nodesIdents & mapMaybe \case  
+  (Left _, _, _) -> Nothing
+  (Right name, ids@IdentifierDetails{ identInfo }, ast) ->
+    if f identInfo
+      then (, ids, ast) <$> nameToDeclaration name
+      else Nothing
 
-           ( Right name, ids@IdentifierDetails{ identInfo } ) ->
-             if f identInfo then
-               (, ids, n) <$> foldMap pure (nameToDeclaration name)
+  where
 
-             else
-               mempty
-           )
-       (foldMap (Map.toList . nodeIdentifiers) (getSourcedNodeInfo sourcedNodeInfo))
-  <> foldMap ( findIdentifiers' f ) nodeChildren
+    nodes = flattenAst n
+    idents = Map.toList . sourcedNodeIdents . sourcedNodeInfo
+    nodesIdents = [ (name, ids, ast) | ast <- nodes, (name, ids) <- idents ast ]
 
 
 uses :: HieAST a -> Set Declaration
