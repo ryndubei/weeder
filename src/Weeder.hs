@@ -374,25 +374,20 @@ addAllDeclarations n = do
 
 topLevelAnalysis :: ( MonadState Analysis m, MonadReader AnalysisInfo m ) => HieAST TypeIndex -> m ()
 topLevelAnalysis n@Node{ nodeChildren } = do
-  Config{ unusedTypes } <- asks weederConfig
   analysed <-
     runMaybeT
-      ( msum . map ($ n) $
-          [ analyseStandaloneDeriving
-          , analyseInstanceDeclaration
-          , analyseBinding
-          , analyseRewriteRule
-          , analyseClassDeclaration
-          , analyseDataDeclaration
-          , analysePatternSynonyms
-          ] ++ if unusedTypes 
-            then 
-          [ analyseTypeSynonym 
-          , analyseFamilyDeclaration
-          , analyseFamilyInstance
-          ] 
-            else 
-          mempty
+      ( msum
+          [ analyseStandaloneDeriving n
+          , analyseInstanceDeclaration n
+          , analyseBinding n
+          , analyseRewriteRule n
+          , analyseClassDeclaration n
+          , analyseDataDeclaration n
+          , analysePatternSynonyms n
+          , analyseTypeSynonym n
+          , analyseFamilyDeclaration n
+          , analyseFamilyInstance n
+          ]
       )
 
   case analysed of
@@ -558,8 +553,10 @@ analyseStandaloneDeriving n@Node{ nodeSpan, sourcedNodeInfo } = do
       Nothing -> pure ()
 
 
-analyseTypeSynonym :: ( Alternative m, MonadState Analysis m ) => HieAST a -> m ()
+analyseTypeSynonym :: ( Alternative m, MonadState Analysis m, MonadReader AnalysisInfo m ) => HieAST a -> m ()
 analyseTypeSynonym n@Node{ nodeSpan, sourcedNodeInfo } = do
+  Config{ unusedTypes } <- asks weederConfig
+  guard unusedTypes
   guard $ any (Set.member ("SynDecl", "TyClDecl") . Set.map unNodeAnnotation . nodeAnnotations) $ getSourcedNodeInfo sourcedNodeInfo
 
   for_ ( findIdentifiers isTypeSynonym n ) $ \d -> do
@@ -575,8 +572,10 @@ analyseTypeSynonym n@Node{ nodeSpan, sourcedNodeInfo } = do
         _             -> False
 
 
-analyseFamilyDeclaration :: ( Alternative m, MonadState Analysis m ) => HieAST a -> m ()
+analyseFamilyDeclaration :: ( Alternative m, MonadState Analysis m, MonadReader AnalysisInfo m ) => HieAST a -> m ()
 analyseFamilyDeclaration n@Node{ nodeSpan, sourcedNodeInfo } = do
+  Config{ unusedTypes } <- asks weederConfig
+  guard unusedTypes
   guard $ any (Set.member ("FamDecl", "TyClDecl") . Set.map unNodeAnnotation . nodeAnnotations) $ getSourcedNodeInfo sourcedNodeInfo
 
   for_ ( findIdentifiers isFamDec n ) $ \d -> do
@@ -592,8 +591,10 @@ analyseFamilyDeclaration n@Node{ nodeSpan, sourcedNodeInfo } = do
         _             -> False
 
 
-analyseFamilyInstance :: ( Alternative m, MonadState Analysis m ) => HieAST a -> m ()
+analyseFamilyInstance :: ( Alternative m, MonadState Analysis m, MonadReader AnalysisInfo m ) => HieAST a -> m ()
 analyseFamilyInstance n@Node{ sourcedNodeInfo } = do
+  Config{ unusedTypes } <- asks weederConfig
+  guard unusedTypes
   guard $ any (Set.member ("TyFamInstD", "InstDecl") . Set.map unNodeAnnotation . nodeAnnotations) $ getSourcedNodeInfo sourcedNodeInfo
 
   for_ ( uses n ) addImplicitRoot
