@@ -374,6 +374,8 @@ addAllDeclarations n = do
 
 topLevelAnalysis :: ( MonadState Analysis m, MonadReader AnalysisInfo m ) => HieAST TypeIndex -> m ()
 topLevelAnalysis n@Node{ nodeChildren } = do
+  Config{ unusedTypes } <- asks weederConfig
+
   analysed <-
     runMaybeT
       ( msum
@@ -384,9 +386,9 @@ topLevelAnalysis n@Node{ nodeChildren } = do
           , analyseClassDeclaration n
           , analyseDataDeclaration n
           , analysePatternSynonyms n
-          , analyseTypeSynonym n
-          , analyseFamilyDeclaration n
-          , analyseFamilyInstance n
+          , guard unusedTypes >> analyseTypeSynonym n
+          , guard unusedTypes >> analyseFamilyDeclaration n
+          , guard unusedTypes >> analyseFamilyInstance n
           ]
       )
 
@@ -558,10 +560,8 @@ analyseStandaloneDeriving n@Node{ nodeSpan } = do
       Nothing -> pure ()
 
 
-analyseTypeSynonym :: ( Alternative m, MonadState Analysis m, MonadReader AnalysisInfo m ) => HieAST a -> m ()
+analyseTypeSynonym :: ( Alternative m, MonadState Analysis m ) => HieAST a -> m ()
 analyseTypeSynonym n@Node{ nodeSpan } = do
-  Config{ unusedTypes } <- asks weederConfig
-  guard unusedTypes
   guard $ annsContain n ("SynDecl", "TyClDecl")
 
   for_ ( findIdentifiers isTypeSynonym n ) $ \d -> do
@@ -577,10 +577,8 @@ analyseTypeSynonym n@Node{ nodeSpan } = do
         _             -> False
 
 
-analyseFamilyDeclaration :: ( Alternative m, MonadState Analysis m, MonadReader AnalysisInfo m ) => HieAST a -> m ()
+analyseFamilyDeclaration :: ( Alternative m, MonadState Analysis m ) => HieAST a -> m ()
 analyseFamilyDeclaration n@Node{ nodeSpan } = do
-  Config{ unusedTypes } <- asks weederConfig
-  guard unusedTypes
   guard $ annsContain n ("FamDecl", "TyClDecl")
 
   for_ ( findIdentifiers isFamDec n ) $ \d -> do
@@ -596,10 +594,8 @@ analyseFamilyDeclaration n@Node{ nodeSpan } = do
         _             -> False
 
 
-analyseFamilyInstance :: ( Alternative m, MonadState Analysis m, MonadReader AnalysisInfo m ) => HieAST a -> m ()
+analyseFamilyInstance :: ( Alternative m, MonadState Analysis m ) => HieAST a -> m ()
 analyseFamilyInstance n = do
-  Config{ unusedTypes } <- asks weederConfig
-  guard unusedTypes
   guard $ annsContain n ("TyFamInstD", "InstDecl")
 
   for_ ( uses n ) addImplicitRoot
