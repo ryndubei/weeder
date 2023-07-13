@@ -263,7 +263,7 @@ typeToNames (Roll t) = case t of
   HTyConApp (IfaceTyCon{ifaceTyConName}) (HieArgs args) ->
     Set.singleton ifaceTyConName <> hieArgsTypes args
 
-  HForAllTy _ b -> typeToNames b
+  HForAllTy _ _ -> mempty
 
   HFunTy _mult b c -> 
     typeToNames b <> typeToNames c
