@@ -431,7 +431,7 @@ analyseInstanceDeclaration :: ( Alternative m, MonadState Analysis m, MonadReade
 analyseInstanceDeclaration n@Node{ nodeSpan } = do
   guard $ annsContain n ("ClsInstD", "InstDecl")
 
-  for_ ( findEvInstBinds n ) \(d, cs, ids, _) -> do
+  for_ ( firstFoldable $ findEvInstBinds n ) \(d, cs, ids, _) -> do
     -- This makes instance declarations show up in 
     -- the output if type-class-roots is set to False.
     define d nodeSpan
@@ -449,7 +449,7 @@ analyseClassDeclaration :: ( Alternative m, MonadState Analysis m, MonadReader A
 analyseClassDeclaration n@Node{ nodeSpan } = do
   guard $ annsContain n ("ClassDecl", "TyClDecl")
 
-  for_ ( findIdentifiers isClassDeclaration n ) $ \d -> do
+  for_ ( firstFoldable $ findIdentifiers isClassDeclaration n ) $ \d -> do
     define d nodeSpan
 
     followEvidenceUses n d
@@ -543,7 +543,7 @@ analyseStandaloneDeriving :: ( Alternative m, MonadState Analysis m, MonadReader
 analyseStandaloneDeriving n@Node{ nodeSpan } = do
   guard $ annsContain n ("DerivDecl", "DerivDecl")
 
-  for_ (findEvInstBinds n) \(d, cs, ids, _) -> do
+  for_ (firstFoldable $ findEvInstBinds n) \(d, cs, ids, _) -> do
     define d nodeSpan
 
     followEvidenceUses n d
@@ -559,7 +559,7 @@ analyseTypeSynonym :: ( Alternative m, MonadState Analysis m ) => HieAST a -> m 
 analyseTypeSynonym n@Node{ nodeSpan } = do
   guard $ annsContain n ("SynDecl", "TyClDecl")
 
-  for_ ( findIdentifiers isTypeSynonym n ) $ \d -> do
+  for_ ( firstFoldable $ findIdentifiers isTypeSynonym n ) $ \d -> do
     define d nodeSpan
 
     for_ (uses n) (addDependency d)
@@ -576,7 +576,7 @@ analyseFamilyDeclaration :: ( Alternative m, MonadState Analysis m ) => HieAST a
 analyseFamilyDeclaration n@Node{ nodeSpan } = do
   guard $ annsContain n ("FamDecl", "TyClDecl")
 
-  for_ ( findIdentifiers isFamDec n ) $ \d -> do
+  for_ ( firstFoldable $ findIdentifiers isFamDec n ) $ \d -> do
     define d nodeSpan
 
     for_ (uses n) (addDependency d)
