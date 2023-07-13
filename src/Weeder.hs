@@ -43,7 +43,6 @@ import Prelude hiding ( span )
 -- containers
 import Data.Map.Strict ( Map )
 import qualified Data.Map.Strict as Map
-import Data.Sequence ( Seq )
 import Data.Set ( Set )
 import qualified Data.Set as Set
 import Data.Tree (Tree)
@@ -85,7 +84,7 @@ import GHC.Iface.Ext.Utils
   , getEvidenceTree
   , generateReferencesMap
   , hieTypeToIface
-  , recoverFullType
+  , recoverFullType, flattenAst, sourcedNodeIdents
   )
 import GHC.Unit.Module ( Module, moduleStableString )
 import GHC.Utils.Outputable ( defaultSDocContext, showSDocOneLine )
@@ -474,17 +473,13 @@ analyseDataDeclaration n = do
 
   Config{ unusedTypes } <- asks weederConfig
 
-  for_
-    ( foldMap
-        ( First . Just )
-        ( findIdentifiers ( any isDataDec ) n )
-    )
+  for_ ( firstFoldable $ findIdentifiers ( any isDataDec ) n )
     \dataTypeName -> do
       when unusedTypes $
         define dataTypeName (nodeSpan n)
 
       for_ ( constructors n ) \constructor ->
-        for_ ( foldMap ( First . Just ) ( findIdentifiers ( any isConDec ) constructor ) ) \conDec -> do
+        for_ ( firstFoldable $ findIdentifiers ( any isConDec ) constructor ) \conDec -> do
           addDependency conDec dataTypeName
 
           -- uncomment to make unused constructors show up in the output
@@ -494,7 +489,7 @@ analyseDataDeclaration n = do
 
           -- Connecting record fields to their constructors
           for_ ( recFieldDecls constructor ) \recFieldDec ->
-            for_ ( foldMap ( First . Just ) ( findIdentifiers ( any isRecFieldDec ) recFieldDec ) ) 
+            for_ ( firstFoldable $ findIdentifiers ( any isRecFieldDec ) recFieldDec ) 
               (`addDependency` conDec)
 
   for_ ( derivedInstances n ) \(d, cs, ids, ast) -> do
@@ -703,6 +698,10 @@ nameToDeclaration name = do
 
 unNodeAnnotation :: NodeAnnotation -> (String, String)
 unNodeAnnotation (NodeAnnotation x y) = (unpackFS x, unpackFS y)
+
+
+firstFoldable :: Foldable f => f a -> First a
+firstFoldable = foldMap (First . Just)
 
 
 -- | Follow evidence uses under the given node back to their instance bindings,
