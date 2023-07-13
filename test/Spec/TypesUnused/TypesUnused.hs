@@ -10,5 +10,3 @@ type Number = Double
 newtype Vector = MkVector (Double, Double, Double)
 
 type family Family a
-
-type instance Family Int = Bool

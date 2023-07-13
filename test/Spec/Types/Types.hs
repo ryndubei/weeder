@@ -1,5 +1,4 @@
 {-# OPTIONS_GHC -Wno-missing-methods #-}
-{-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE DeriveFunctor #-}
 
 module Spec.Types.Types where
@@ -18,9 +17,3 @@ data Record = MkRecord
   { recordField1 :: Int
   , recordField2 :: Double
   }
-
-data T = MkT
-
-type family Family a
-
-type instance Family Int = T

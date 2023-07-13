@@ -103,7 +103,9 @@ test-suite weeder-test
     Spec.RootClasses.RootClasses
     Spec.StandaloneDeriving.StandaloneDeriving
     Spec.Types.Types
-    Spec.TypesUnused.TypesUnused
     Spec.Types.Usages
+    Spec.TypeFamilies.TypeFamilies
+    Spec.TypeFamilies.TypeFamilyUsage
+    Spec.TypesUnused.TypesUnused
   ghc-options: -Wall -fwarn-incomplete-uni-patterns -fwrite-ide-info -hiedir ./test
   default-language: Haskell2010

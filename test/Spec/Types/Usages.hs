@@ -6,9 +6,6 @@ import Spec.Types.Types
 numberUsage :: Number -> Number
 numberUsage = id
 
-familyUsage :: Family Int -> Bool
-familyUsage = const True
-
 -- should depend on Modulo1
 modulo1Usage = minBound
 
