@@ -2,7 +2,7 @@
 {-# LANGUAGE TypeFamilies #-}
 module Spec.OverloadedLists.OverloadedLists where
 
-import GHC.IsList ( IsList(..) )
+import GHC.Exts ( IsList(..) )
 
 data BetterList x = Nil | Cons x (BetterList x)
 
