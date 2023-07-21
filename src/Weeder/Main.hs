@@ -5,6 +5,7 @@
 {-# language OverloadedStrings #-}
 {-# language LambdaCase #-}
 {-# language RecordWildCards #-}
+{-# language CPP #-}
 
 -- | This module provides an entry point to the Weeder executable.
 
@@ -57,6 +58,15 @@ import Control.Monad.Trans.State.Strict ( execStateT )
 import Weeder
 import Weeder.Config
 import Paths_weeder (version)
+
+#if !MIN_VERSION_ghc(9,3,0)
+-- base
+import Data.IORef ( IORef, newIORef, atomicModifyIORef )
+
+-- ghc
+import GHC.Iface.Ext.Binary ( NameCacheUpdater(..) )
+import GHC.Types.Unique.Supply ( mkSplitUniqSupply )
+#endif
 
 
 data CLIArguments = CLIArguments
@@ -155,8 +165,15 @@ mainWithConfig hieExt hieDirectories requireHsFiles weederConfig@Config{ rootPat
       then getFilesIn ".hs" "./."
       else pure []
 
+#if MIN_VERSION_ghc(9,3,0)
   nameCache <-
     initNameCache 'z' []
+#else
+  us <- 
+    mkSplitUniqSupply 'z'
+  nameCache <- 
+    newIORef (initNameCache us [])
+#endif
 
   hieFileResults <-
     mapM ( readCompatibleHieFileOrExit nameCache ) hieFilePaths
@@ -286,9 +303,15 @@ getFilesIn ext path = do
 
 
 -- | Read a .hie file, exiting if it's an incompatible version.
+#if MIN_VERSION_ghc(9,3,0)
 readCompatibleHieFileOrExit :: NameCache -> FilePath -> IO HieFile
 readCompatibleHieFileOrExit nameCache path = do
   res <- readHieFileWithVersion (\(v, _) -> v == hieVersion) nameCache path
+#else
+readCompatibleHieFileOrExit :: IORef NameCache -> FilePath -> IO HieFile
+readCompatibleHieFileOrExit nameCache path = do
+  res <- readHieFileWithVersion (\(v, _) -> v == hieVersion) (NCU $ atomicModifyIORef nameCache) path
+#endif
   case res of
     Right HieFileResult{ hie_file_result } ->
       return hie_file_result
