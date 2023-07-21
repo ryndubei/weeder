@@ -45,6 +45,7 @@ library
   autogen-modules:
     Paths_weeder
   other-modules:
+    Weeder.Compat
     Paths_weeder
   ghc-options: -Wall -fwarn-incomplete-uni-patterns
   default-language: Haskell2010

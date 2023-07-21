@@ -5,7 +5,6 @@
 {-# language OverloadedStrings #-}
 {-# language LambdaCase #-}
 {-# language RecordWildCards #-}
-{-# language CPP #-}
 
 -- | This module provides an entry point to the Weeder executable.
 
@@ -17,7 +16,7 @@ import Control.Monad ( guard, unless )
 import Data.Foldable
 import Data.List ( isSuffixOf, sortOn )
 import Data.Version ( showVersion )
-import System.Exit ( exitFailure, ExitCode(..), exitWith )
+import System.Exit ( ExitCode(..), exitWith )
 import System.IO ( stderr, hPutStrLn )
 
 -- containers
@@ -35,10 +34,8 @@ import System.Directory ( canonicalizePath, doesDirectoryExist, doesFileExist, d
 import System.FilePath ( isExtensionOf )
 
 -- ghc
-import GHC.Iface.Ext.Binary ( HieFileResult( HieFileResult, hie_file_result ), readHieFileWithVersion )
 import GHC.Iface.Ext.Types ( HieFile( hie_hs_file ), hieVersion )
 import GHC.Unit.Module ( moduleName, moduleNameString )
-import GHC.Types.Name.Cache ( initNameCache, NameCache )
 import GHC.Types.Name ( occNameString )
 import GHC.Types.SrcLoc ( RealSrcLoc, realSrcSpanStart, srcLocLine )
 
@@ -57,17 +54,8 @@ import Control.Monad.Trans.State.Strict ( execStateT )
 -- weeder
 import Weeder
 import Weeder.Config
+import Weeder.Compat
 import Paths_weeder (version)
-
-#if !MIN_VERSION_ghc(9,3,0)
--- base
-import Data.IORef ( IORef, newIORef, atomicModifyIORef )
-
--- ghc
-import GHC.Iface.Ext.Binary ( NameCacheUpdater(..) )
-import GHC.Types.Unique.Supply ( mkSplitUniqSupply )
-#endif
-
 
 data CLIArguments = CLIArguments
   { configPath :: FilePath
@@ -165,18 +153,7 @@ mainWithConfig hieExt hieDirectories requireHsFiles weederConfig@Config{ rootPat
       then getFilesIn ".hs" "./."
       else pure []
 
-#if MIN_VERSION_ghc(9,3,0)
-  nameCache <-
-    initNameCache 'z' []
-#else
-  us <- 
-    mkSplitUniqSupply 'z'
-  nameCache <- 
-    newIORef (initNameCache us [])
-#endif
-
-  hieFileResults <-
-    mapM ( readCompatibleHieFileOrExit nameCache ) hieFilePaths
+  hieFileResults <- readHieFiles hieFilePaths
 
   let
     hieFileResults' = flip filter hieFileResults \hieFileResult ->
@@ -300,30 +277,6 @@ getFilesIn ext path = do
 
     else
       return []
-
-
--- | Read a .hie file, exiting if it's an incompatible version.
-#if MIN_VERSION_ghc(9,3,0)
-readCompatibleHieFileOrExit :: NameCache -> FilePath -> IO HieFile
-readCompatibleHieFileOrExit nameCache path = do
-  res <- readHieFileWithVersion (\(v, _) -> v == hieVersion) nameCache path
-#else
-readCompatibleHieFileOrExit :: IORef NameCache -> FilePath -> IO HieFile
-readCompatibleHieFileOrExit nameCache path = do
-  res <- readHieFileWithVersion (\(v, _) -> v == hieVersion) (NCU $ atomicModifyIORef nameCache) path
-#endif
-  case res of
-    Right HieFileResult{ hie_file_result } ->
-      return hie_file_result
-    Left ( v, _ghcVersion ) -> do
-      putStrLn $ "incompatible hie file: " <> path
-      putStrLn $ "    this version of weeder was compiled with GHC version "
-               <> show hieVersion
-      putStrLn $ "    the hie files in this project were generated with GHC version "
-               <> show v
-      putStrLn $ "    weeder must be built with the same GHC version"
-               <> " as the project it is used on"
-      exitFailure
 
 
 infixr 5 ==>
