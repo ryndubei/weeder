@@ -1,0 +1,2 @@
+test/Spec/GADTClassAcyclic/GADTClassAcyclic.hs:6: MkFoo
+test/Spec/GADTClassAcyclic/GADTClassAcyclic.hs:8: Bar

@@ -1,0 +1,9 @@
+roots = [ "Spec.GADTClassAcyclic.GADTClassAcyclic.Foo" ]
+
+type-class-roots = false
+
+unused-types = true
+
+root-instances = []
+
+root-classes = []

@@ -96,6 +96,7 @@ test-suite weeder-test
     Spec.ConfigInstanceModules.Module2
     Spec.ConfigInstanceModules.Module3
     Spec.DeriveGeneric.DeriveGeneric
+    Spec.GADTClassAcyclic.GADTClassAcyclic
     Spec.InstanceRootConstraint.InstanceRootConstraint
     Spec.InstanceTypeclass.InstanceTypeclass
     Spec.Monads.Monads
