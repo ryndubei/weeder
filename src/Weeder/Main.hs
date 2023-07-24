@@ -8,7 +8,7 @@
 
 -- | This module provides an entry point to the Weeder executable.
 
-module Weeder.Main ( main, mainWithConfig, getHieFiles, runAnalysis ) where
+module Weeder.Main ( main, mainWithConfig, getHieFiles, printWeeds, runAnalysis ) where
 
 -- base
 import Control.Exception ( throwIO )
@@ -142,12 +142,15 @@ mainWithConfig hieExt hieDirectories requireHsFiles weederConfig = do
   hieFiles <-
     getHieFiles hieExt hieDirectories requireHsFiles
 
-  (exitCode, _) <-
-    runAnalysis weederConfig hieFiles
+  let 
+    (analysis, dead) = 
+      runAnalysis weederConfig hieFiles
+  
+  printWeeds analysis dead
 
-  exitWith exitCode
 
--- | Find and read all .hie files in the given directories according to the given parameters.
+-- | Find and read all .hie files in the given directories according to the given parameters,
+-- exiting if any are incompatible with the current version of GHC.
 getHieFiles :: String -> [FilePath] -> Bool -> IO [HieFile]
 getHieFiles hieExt hieDirectories requireHsFiles = do
   hieFilePaths <-
@@ -176,7 +179,8 @@ getHieFiles hieExt hieDirectories requireHsFiles = do
 
   pure hieFileResults'
 
-runAnalysis :: Config -> [HieFile] -> IO (ExitCode, Analysis)
+
+runAnalysis :: Config -> [HieFile] -> (Analysis, Set Declaration)
 runAnalysis weederConfig@Config{ rootPatterns, typeClassRoots, rootInstances, rootClasses } hieFiles =
   let
     analysis =
@@ -199,29 +203,7 @@ runAnalysis weederConfig@Config{ rootPatterns, typeClassRoots, rootInstances, ro
     dead =
       allDeclarations analysis Set.\\ reachableSet
 
-    warnings =
-      Map.unionsWith (++) $
-      foldMap
-        ( \d ->
-            fold $ do
-              moduleFilePath <- Map.lookup ( declModule d ) ( modulePaths analysis )
-              spans <- Map.lookup d ( declarationSites analysis )
-              guard $ not $ null spans
-              let starts = map realSrcSpanStart $ Set.toList spans
-              return [ Map.singleton moduleFilePath ( liftA2 (,) starts (pure d) ) ]
-        )
-        dead
-    
-    exitCode = if null warnings then ExitSuccess else ExitFailure 2
-
-  in do
-    for_ ( Map.toList warnings ) \( path, declarations ) ->
-      for_ (sortOn (srcLocLine . fst) declarations) \( start, d ) ->
-        case Map.lookup d (prettyPrintedType analysis) of
-          Nothing -> putStrLn $ showWeed path start d
-          Just t -> putStrLn $ showPath path start <> "(Instance) :: " <> t
-
-    pure (exitCode, analysis)
+  in (analysis, dead)
 
   where
 
@@ -244,6 +226,31 @@ runAnalysis weederConfig@Config{ rootPatterns, typeClassRoots, rootInstances, ro
 
           modulePathMatches :: String -> Bool
           modulePathMatches p = maybe False (=~ p) (Map.lookup ( declModule d ) modulePaths)
+
+-- | Print weeds to stdout, exiting with code 2 if any weeds are found.
+printWeeds :: Analysis -> Set Declaration -> IO ()
+printWeeds analysis dead = 
+  let
+    warnings =
+      Map.unionsWith (++) $
+      foldMap
+        ( \d ->
+            fold $ do
+              moduleFilePath <- Map.lookup ( declModule d ) ( modulePaths analysis )
+              spans <- Map.lookup d ( declarationSites analysis )
+              guard $ not $ null spans
+              let starts = map realSrcSpanStart $ Set.toList spans
+              return [ Map.singleton moduleFilePath ( liftA2 (,) starts (pure d) ) ]
+        )
+        dead
+  in do
+    for_ ( Map.toList warnings ) \( path, declarations ) ->
+      for_ (sortOn (srcLocLine . fst) declarations) \( start, d ) ->
+        case Map.lookup d (prettyPrintedType analysis) of
+          Nothing -> putStrLn $ showWeed path start d
+          Just t -> putStrLn $ showPath path start <> "(Instance) :: " <> t
+    
+    unless (null warnings) $ exitWith (ExitFailure 2)
 
 
 showWeed :: FilePath -> RealSrcLoc -> Declaration -> String
