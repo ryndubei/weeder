@@ -8,7 +8,7 @@
 
 -- | This module provides an entry point to the Weeder executable.
 
-module Weeder.Main ( main, mainWithConfig, getHieFiles, showWeeds, runAnalysis ) where
+module Weeder.Main ( main, mainWithConfig, getHieFiles, runWeeder ) where
 
 -- base
 import Control.Exception ( throwIO )
@@ -105,6 +105,21 @@ parseCLIArguments = do
     pure CLIArguments{..}
 
 
+data Weed = Weed
+  { weedPath :: FilePath
+  , weedLoc :: RealSrcLoc
+  , weedDeclaration :: Declaration
+  , weedPrettyPrintedType :: Maybe String
+  }
+
+
+instance Show Weed where
+  show Weed{..} =
+    showPath weedPath weedLoc
+      <> occNameString ( declOccName weedDeclaration )
+      <> maybe "" (" :: " <>) weedPrettyPrintedType
+
+
 -- | Parse command line arguments and into a 'Config' and run 'mainWithConfig'.
 main :: IO ()
 main = do
@@ -147,7 +162,7 @@ mainWithConfig hieExt hieDirectories requireHsFiles weederConfig = do
     (weeds, _) = 
       runWeeder weederConfig hieFiles
     
-  mapM_ putStrLn weeds
+  mapM_ print weeds
 
   unless (null weeds) $ exitWith (ExitFailure 2)
 
@@ -183,22 +198,20 @@ getHieFiles hieExt hieDirectories requireHsFiles = do
   pure hieFileResults'
 
 
-runWeeder :: Config -> [HieFile] -> ([String], Analysis)
+runWeeder :: Config -> [HieFile] -> ([Weed], Analysis)
 runWeeder weederConfig hieFiles =
   let 
     analysis = 
-      runAnalysis weederConfig hieFiles
-    
+      execState ( analyseHieFiles weederConfig hieFiles ) emptyAnalysis
+
     dead = 
       deadDeclarations weederConfig analysis
-    
+
+    weeds = 
+      sortOn ( srcLocLine . weedLoc ) $ deadToWeeds analysis dead
+
   in 
-    (deadToWeeds analysis dead, analysis)
-
-
-runAnalysis :: Config -> [HieFile] -> Analysis
-runAnalysis weederConfig hieFiles =
-  execState ( analyseHieFiles weederConfig hieFiles ) emptyAnalysis
+    (weeds, analysis)
 
 
 deadDeclarations :: Config -> Analysis -> Set Declaration
@@ -244,7 +257,7 @@ deadDeclarations Config{ rootPatterns, typeClassRoots, rootClasses, rootInstance
           modulePathMatches p = maybe False (=~ p) (Map.lookup ( declModule d ) modulePaths)
 
 
-deadToWeeds :: Analysis -> Set Declaration -> [String]
+deadToWeeds :: Analysis -> Set Declaration -> [Weed]
 deadToWeeds analysis dead = 
   let
     warnings =
@@ -260,17 +273,13 @@ deadToWeeds analysis dead =
         )
         dead
   in
-    Map.toList warnings & concatMap \( path, declarations ) ->
-      sortOn (srcLocLine . fst) declarations & map \( start, d ) ->
-        case Map.lookup d (prettyPrintedType analysis) of
-          Nothing -> showWeed path start d
-          Just t -> showPath path start <> "(Instance) :: " <> t
-
-
-showWeed :: FilePath -> RealSrcLoc -> Declaration -> String
-showWeed path start d =
-  showPath path start
-    <> occNameString ( declOccName d)
+    Map.toList warnings & concatMap \( weedPath, declarations ) ->
+      declarations & map \( weedLoc, weedDeclaration ) ->
+        Weed { weedPrettyPrintedType = Map.lookup weedDeclaration (prettyPrintedType analysis)
+             , weedPath
+             , weedLoc
+             , weedDeclaration
+             }
 
 
 showPath :: FilePath -> RealSrcLoc -> String
