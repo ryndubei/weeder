@@ -144,12 +144,9 @@ mainWithConfig hieExt hieDirectories requireHsFiles weederConfig = do
     getHieFiles hieExt hieDirectories requireHsFiles
 
   let 
-    (analysis, dead) = 
-      runAnalysis weederConfig hieFiles
+    (weeds, _) = 
+      runWeeder weederConfig hieFiles
     
-    weeds = 
-      showWeeds analysis dead
-
   mapM_ putStrLn weeds
 
   unless (null weeds) $ exitWith (ExitFailure 2)
@@ -186,12 +183,27 @@ getHieFiles hieExt hieDirectories requireHsFiles = do
   pure hieFileResults'
 
 
-runAnalysis :: Config -> [HieFile] -> (Analysis, Set Declaration)
-runAnalysis weederConfig@Config{ rootPatterns, typeClassRoots, rootInstances, rootClasses } hieFiles =
-  let
-    analysis =
-      execState ( analyseHieFiles weederConfig hieFiles ) emptyAnalysis
+runWeeder :: Config -> [HieFile] -> ([String], Analysis)
+runWeeder weederConfig hieFiles =
+  let 
+    analysis = 
+      runAnalysis weederConfig hieFiles
+    
+    dead = 
+      deadDeclarations weederConfig analysis
+    
+  in 
+    (deadToWeeds analysis dead, analysis)
 
+
+runAnalysis :: Config -> [HieFile] -> Analysis
+runAnalysis weederConfig hieFiles =
+  execState ( analyseHieFiles weederConfig hieFiles ) emptyAnalysis
+
+
+deadDeclarations :: Config -> Analysis -> Set Declaration
+deadDeclarations Config{ rootPatterns, typeClassRoots, rootClasses, rootInstances } analysis =
+  let
     roots =
       Set.filter
         ( \d ->
@@ -206,10 +218,8 @@ runAnalysis weederConfig@Config{ rootPatterns, typeClassRoots, rootInstances, ro
         analysis
         ( Set.map DeclarationRoot roots <> filterImplicitRoots analysis ( implicitRoots analysis ) )
 
-    dead =
-      allDeclarations analysis Set.\\ reachableSet
-
-  in (analysis, dead)
+  in 
+    allDeclarations analysis Set.\\ reachableSet
 
   where
 
@@ -234,8 +244,8 @@ runAnalysis weederConfig@Config{ rootPatterns, typeClassRoots, rootInstances, ro
           modulePathMatches p = maybe False (=~ p) (Map.lookup ( declModule d ) modulePaths)
 
 
-showWeeds :: Analysis -> Set Declaration -> [String]
-showWeeds analysis dead = 
+deadToWeeds :: Analysis -> Set Declaration -> [String]
+deadToWeeds analysis dead = 
   let
     warnings =
       Map.unionsWith (++) $
