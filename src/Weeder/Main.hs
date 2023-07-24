@@ -8,12 +8,13 @@
 
 -- | This module provides an entry point to the Weeder executable.
 
-module Weeder.Main ( main, mainWithConfig, getHieFiles, printWeeds, runAnalysis ) where
+module Weeder.Main ( main, mainWithConfig, getHieFiles, showWeeds, runAnalysis ) where
 
 -- base
 import Control.Exception ( throwIO )
 import Control.Monad ( guard, unless )
 import Data.Foldable
+import Data.Function ((&))
 import Data.List ( isSuffixOf, sortOn )
 import Data.Version ( showVersion )
 import System.Exit ( ExitCode(..), exitWith )
@@ -145,8 +146,13 @@ mainWithConfig hieExt hieDirectories requireHsFiles weederConfig = do
   let 
     (analysis, dead) = 
       runAnalysis weederConfig hieFiles
-  
-  printWeeds analysis dead
+    
+    weeds = 
+      showWeeds analysis dead
+
+  mapM_ putStrLn weeds
+
+  unless (null weeds) $ exitWith (ExitFailure 2)
 
 
 -- | Find and read all .hie files in the given directories according to the given parameters,
@@ -227,9 +233,9 @@ runAnalysis weederConfig@Config{ rootPatterns, typeClassRoots, rootInstances, ro
           modulePathMatches :: String -> Bool
           modulePathMatches p = maybe False (=~ p) (Map.lookup ( declModule d ) modulePaths)
 
--- | Print weeds to stdout, exiting with code 2 if any weeds are found.
-printWeeds :: Analysis -> Set Declaration -> IO ()
-printWeeds analysis dead = 
+
+showWeeds :: Analysis -> Set Declaration -> [String]
+showWeeds analysis dead = 
   let
     warnings =
       Map.unionsWith (++) $
@@ -243,14 +249,12 @@ printWeeds analysis dead =
               return [ Map.singleton moduleFilePath ( liftA2 (,) starts (pure d) ) ]
         )
         dead
-  in do
-    for_ ( Map.toList warnings ) \( path, declarations ) ->
-      for_ (sortOn (srcLocLine . fst) declarations) \( start, d ) ->
+  in
+    Map.toList warnings & concatMap \( path, declarations ) ->
+      sortOn (srcLocLine . fst) declarations & map \( start, d ) ->
         case Map.lookup d (prettyPrintedType analysis) of
-          Nothing -> putStrLn $ showWeed path start d
-          Just t -> putStrLn $ showPath path start <> "(Instance) :: " <> t
-    
-    unless (null warnings) $ exitWith (ExitFailure 2)
+          Nothing -> showWeed path start d
+          Just t -> showPath path start <> "(Instance) :: " <> t
 
 
 showWeed :: FilePath -> RealSrcLoc -> Declaration -> String
