@@ -8,7 +8,7 @@
 
 -- | This module provides an entry point to the Weeder executable.
 
-module Weeder.Main ( main, mainWithConfig ) where
+module Weeder.Main ( main, mainWithConfig, getHieFiles, runAnalysis ) where
 
 -- base
 import Control.Exception ( throwIO )
@@ -16,7 +16,7 @@ import Control.Monad ( guard, unless )
 import Data.Foldable
 import Data.List ( isSuffixOf, sortOn )
 import Data.Version ( showVersion )
-import System.Exit ( exitFailure, ExitCode(..), exitWith )
+import System.Exit ( ExitCode(..), exitWith )
 import System.IO ( stderr, hPutStrLn )
 
 -- containers
@@ -51,7 +51,7 @@ import Options.Applicative
 import qualified Data.Text.IO as T
 
 -- transformers
-import Control.Monad.Trans.State.Strict ( execStateT )
+import Control.Monad.Trans.State.Strict ( execState )
 
 -- weeder
 import Weeder
@@ -118,12 +118,9 @@ main = do
     hPutStrLn stderr $ "Did not find config: wrote default config to " ++ configPath
     writeFile configPath (configToToml defaultConfig)
 
-  (exitCode, _) <-
-    decodeConfig noDefaultFields configPath
-      >>= either throwIO pure
-      >>= mainWithConfig hieExt hieDirectories requireHsFiles
-
-  exitWith exitCode
+  decodeConfig noDefaultFields configPath
+    >>= either throwIO pure
+    >>= mainWithConfig hieExt hieDirectories requireHsFiles
   where
     decodeConfig noDefaultFields = 
       if noDefaultFields 
@@ -140,8 +137,19 @@ main = do
 --
 -- This will recursively find all files with the given extension in the given directories, perform
 -- analysis, and report all unused definitions according to the 'Config'.
-mainWithConfig :: String -> [FilePath] -> Bool -> Config -> IO (ExitCode, Analysis)
-mainWithConfig hieExt hieDirectories requireHsFiles weederConfig@Config{ rootPatterns, typeClassRoots, rootInstances, rootClasses } = do
+mainWithConfig :: String -> [FilePath] -> Bool -> Config -> IO ()
+mainWithConfig hieExt hieDirectories requireHsFiles weederConfig = do
+  hieFiles <-
+    getHieFiles hieExt hieDirectories requireHsFiles
+
+  (exitCode, _) <-
+    runAnalysis weederConfig hieFiles
+
+  exitWith exitCode
+
+-- | Find and read all .hie files in the given directories according to the given parameters.
+getHieFiles :: String -> [FilePath] -> Bool -> IO [HieFile]
+getHieFiles hieExt hieDirectories requireHsFiles = do
   hieFilePaths <-
     concat <$>
       traverse ( getFilesIn hieExt )
@@ -166,10 +174,14 @@ mainWithConfig hieExt hieDirectories requireHsFiles weederConfig@Config{ rootPat
       let hsFileExists = any ( hie_hs_file hieFileResult `isSuffixOf` ) hsFilePaths
        in requireHsFiles ==> hsFileExists
 
-  analysis <-
-    execStateT ( analyseHieFiles weederConfig hieFileResults' ) emptyAnalysis
+  pure hieFileResults'
 
+runAnalysis :: Config -> [HieFile] -> IO (ExitCode, Analysis)
+runAnalysis weederConfig@Config{ rootPatterns, typeClassRoots, rootInstances, rootClasses } hieFiles =
   let
+    analysis =
+      execState ( analyseHieFiles weederConfig hieFiles ) emptyAnalysis
+
     roots =
       Set.filter
         ( \d ->
@@ -199,16 +211,17 @@ mainWithConfig hieExt hieDirectories requireHsFiles weederConfig@Config{ rootPat
               return [ Map.singleton moduleFilePath ( liftA2 (,) starts (pure d) ) ]
         )
         dead
+    
+    exitCode = if null warnings then ExitSuccess else ExitFailure 2
 
-  for_ ( Map.toList warnings ) \( path, declarations ) ->
-    for_ (sortOn (srcLocLine . fst) declarations) \( start, d ) ->
-      case Map.lookup d (prettyPrintedType analysis) of
-        Nothing -> putStrLn $ showWeed path start d
-        Just t -> putStrLn $ showPath path start <> "(Instance) :: " <> t
+  in do
+    for_ ( Map.toList warnings ) \( path, declarations ) ->
+      for_ (sortOn (srcLocLine . fst) declarations) \( start, d ) ->
+        case Map.lookup d (prettyPrintedType analysis) of
+          Nothing -> putStrLn $ showWeed path start d
+          Just t -> putStrLn $ showPath path start <> "(Instance) :: " <> t
 
-  let exitCode = if null warnings then ExitSuccess else ExitFailure 1
-
-  pure (exitCode, analysis)
+    pure (exitCode, analysis)
 
   where
 
@@ -300,7 +313,7 @@ readCompatibleHieFileOrExit nameCache path = do
                <> show v
       putStrLn $ "    weeder must be built with the same GHC version"
                <> " as the project it is used on"
-      exitFailure
+      exitWith (ExitFailure 3)
 
 
 infixr 5 ==>
