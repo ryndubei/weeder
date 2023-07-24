@@ -120,6 +120,11 @@ instance Show Weed where
       <> maybe mempty (" :: " <>) weedPrettyPrintedType
 
 
+showPath :: FilePath -> RealSrcLoc -> String
+showPath path start =
+  path <> ":" <> show ( srcLocLine start ) <> ": "
+
+
 -- | Parse command line arguments and into a 'Config' and run 'mainWithConfig'.
 main :: IO ()
 main = do
@@ -266,11 +271,6 @@ runWeeder weederConfig@Config{ rootPatterns, typeClassRoots, rootClasses, rootIn
 
           modulePathMatches :: String -> Bool
           modulePathMatches p = maybe False (=~ p) (Map.lookup ( declModule d ) modulePaths)
-
-
-showPath :: FilePath -> RealSrcLoc -> String
-showPath path start =
-  path <> ":" <> show ( srcLocLine start ) <> ": "
 
 
 -- | Recursively search for files with the given extension in given directory
