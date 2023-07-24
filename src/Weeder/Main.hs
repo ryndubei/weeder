@@ -116,8 +116,9 @@ data Weed = Weed
 instance Show Weed where
   show Weed{..} =
     showPath weedPath weedLoc
-      <> occNameString ( declOccName weedDeclaration )
-      <> maybe mempty (" :: " <>) weedPrettyPrintedType
+      <> case weedPrettyPrintedType of
+        Nothing -> occNameString ( declOccName weedDeclaration )
+        Just t -> "(Instance) :: " <> t
 
 
 showPath :: FilePath -> RealSrcLoc -> String
