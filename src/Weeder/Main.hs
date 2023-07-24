@@ -115,15 +115,10 @@ data Weed = Weed
 
 instance Show Weed where
   show Weed{..} =
-    showPath weedPath weedLoc
+    weedPath <> ":" <> show ( srcLocLine weedLoc ) <> ": "
       <> case weedPrettyPrintedType of
         Nothing -> occNameString ( declOccName weedDeclaration )
         Just t -> "(Instance) :: " <> t
-
-
-showPath :: FilePath -> RealSrcLoc -> String
-showPath path start =
-  path <> ":" <> show ( srcLocLine start ) <> ": "
 
 
 -- | Parse command line arguments and into a 'Config' and run 'mainWithConfig'.
