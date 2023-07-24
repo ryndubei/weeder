@@ -8,7 +8,7 @@
 
 -- | This module provides an entry point to the Weeder executable.
 
-module Weeder.Main ( main, mainWithConfig, getHieFiles, runWeeder ) where
+module Weeder.Main ( main, mainWithConfig, getHieFiles, runWeeder, Weed(..) ) where
 
 -- base
 import Control.Exception ( throwIO )
@@ -117,7 +117,7 @@ instance Show Weed where
   show Weed{..} =
     showPath weedPath weedLoc
       <> occNameString ( declOccName weedDeclaration )
-      <> maybe "" (" :: " <>) weedPrettyPrintedType
+      <> maybe mempty (" :: " <>) weedPrettyPrintedType
 
 
 -- | Parse command line arguments and into a 'Config' and run 'mainWithConfig'.
@@ -199,24 +199,11 @@ getHieFiles hieExt hieDirectories requireHsFiles = do
 
 
 runWeeder :: Config -> [HieFile] -> ([Weed], Analysis)
-runWeeder weederConfig hieFiles =
+runWeeder weederConfig@Config{ rootPatterns, typeClassRoots, rootClasses, rootInstances } hieFiles =
   let 
     analysis = 
       execState ( analyseHieFiles weederConfig hieFiles ) emptyAnalysis
 
-    dead = 
-      deadDeclarations weederConfig analysis
-
-    weeds = 
-      sortOn ( srcLocLine . weedLoc ) $ deadToWeeds analysis dead
-
-  in 
-    (weeds, analysis)
-
-
-deadDeclarations :: Config -> Analysis -> Set Declaration
-deadDeclarations Config{ rootPatterns, typeClassRoots, rootClasses, rootInstances } analysis =
-  let
     roots =
       Set.filter
         ( \d ->
@@ -231,8 +218,32 @@ deadDeclarations Config{ rootPatterns, typeClassRoots, rootClasses, rootInstance
         analysis
         ( Set.map DeclarationRoot roots <> filterImplicitRoots analysis ( implicitRoots analysis ) )
 
-  in 
-    allDeclarations analysis Set.\\ reachableSet
+    dead =
+      allDeclarations analysis Set.\\ reachableSet
+
+    warnings =
+      Map.unionsWith (++) $
+      foldMap
+        ( \d ->
+            fold $ do
+              moduleFilePath <- Map.lookup ( declModule d ) ( modulePaths analysis )
+              spans <- Map.lookup d ( declarationSites analysis )
+              guard $ not $ null spans
+              let starts = map realSrcSpanStart $ Set.toList spans
+              return [ Map.singleton moduleFilePath ( liftA2 (,) starts (pure d) ) ]
+        )
+        dead
+
+    weeds =
+      Map.toList warnings & concatMap \( weedPath, declarations ) ->
+        sortOn (srcLocLine . fst) declarations & map \( weedLoc, weedDeclaration ) ->
+          Weed { weedPrettyPrintedType = Map.lookup weedDeclaration (prettyPrintedType analysis)
+               , weedPath
+               , weedLoc
+               , weedDeclaration
+               }
+
+  in (weeds, analysis)
 
   where
 
@@ -255,31 +266,6 @@ deadDeclarations Config{ rootPatterns, typeClassRoots, rootClasses, rootInstance
 
           modulePathMatches :: String -> Bool
           modulePathMatches p = maybe False (=~ p) (Map.lookup ( declModule d ) modulePaths)
-
-
-deadToWeeds :: Analysis -> Set Declaration -> [Weed]
-deadToWeeds analysis dead = 
-  let
-    warnings =
-      Map.unionsWith (++) $
-      foldMap
-        ( \d ->
-            fold $ do
-              moduleFilePath <- Map.lookup ( declModule d ) ( modulePaths analysis )
-              spans <- Map.lookup d ( declarationSites analysis )
-              guard $ not $ null spans
-              let starts = map realSrcSpanStart $ Set.toList spans
-              return [ Map.singleton moduleFilePath ( liftA2 (,) starts (pure d) ) ]
-        )
-        dead
-  in
-    Map.toList warnings & concatMap \( weedPath, declarations ) ->
-      declarations & map \( weedLoc, weedDeclaration ) ->
-        Weed { weedPrettyPrintedType = Map.lookup weedDeclaration (prettyPrintedType analysis)
-             , weedPath
-             , weedLoc
-             , weedDeclaration
-             }
 
 
 showPath :: FilePath -> RealSrcLoc -> String
