@@ -42,7 +42,7 @@ import GHC.Types.Name ( occNameString )
 import GHC.Types.SrcLoc ( RealSrcLoc, realSrcSpanStart, srcLocLine )
 
 -- regex-tdfa
-import Text.Regex.TDFA ( (=~) )
+import Text.Regex.TDFA ( (=~), matchTest, CompOption, ExecOption, defaultCompOpt, defaultExecOpt )
 
 -- optparse-applicative
 import Options.Applicative
@@ -57,6 +57,8 @@ import Control.Monad.Trans.State.Strict ( execStateT )
 import Weeder
 import Weeder.Config
 import Paths_weeder (version)
+import Text.Regex.TDFA.ReadRegex (parseRegex)
+import Text.Regex.TDFA.TDFA (patternToRegex)
 
 
 data CLIArguments = CLIArguments
@@ -170,12 +172,17 @@ mainWithConfig hieExt hieDirectories requireHsFiles weederConfig@Config{ rootPat
     execStateT ( analyseHieFiles weederConfig hieFileResults' ) emptyAnalysis
 
   let
+    -- regex-tdfa fails to optimise '=~' such that we don't compile rootPatterns every time:
+    -- parseRegex takes up 15% of runtime from being run in 'roots' if we don't do this
+    rootPatterns' = map (either (error . show) (\p -> patternToRegex p regexComp regexExec) . parseRegex) $ 
+      Set.toList rootPatterns
+
     roots =
       Set.filter
         ( \d ->
             any
-              ( ( moduleNameString ( moduleName ( declModule d ) ) <> "." <> occNameString ( declOccName d ) ) =~ )
-              rootPatterns
+              (`matchTest` ( moduleNameString ( moduleName ( declModule d ) ) <> "." <> occNameString ( declOccName d ) ))
+              rootPatterns'
         )
         ( allDeclarations analysis )
 
@@ -211,6 +218,12 @@ mainWithConfig hieExt hieDirectories requireHsFiles weederConfig@Config{ rootPat
   pure (exitCode, analysis)
 
   where
+
+    regexComp :: CompOption
+    regexComp = defaultCompOpt 
+
+    regexExec :: ExecOption
+    regexExec = defaultExecOpt
 
     filterImplicitRoots :: Analysis -> Set Root -> Set Root
     filterImplicitRoots Analysis{ prettyPrintedType, modulePaths } = Set.filter $ \case
