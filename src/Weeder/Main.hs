@@ -177,6 +177,8 @@ mainWithConfig hieExt hieDirectories requireHsFiles weederConfig@Config{ rootPat
     rootPatterns' = map (either (error . show) (\p -> patternToRegex p regexComp regexExec) . parseRegex) $ 
       Set.toList rootPatterns
 
+    -- It wouldn't make sense to mark a declaration that cannot show up 
+    -- in the output as a root via a pattern
     roots =
       Set.filter
         ( \d ->
@@ -184,15 +186,17 @@ mainWithConfig hieExt hieDirectories requireHsFiles weederConfig@Config{ rootPat
               (`matchTest` ( moduleNameString ( moduleName ( declModule d ) ) <> "." <> occNameString ( declOccName d ) ))
               rootPatterns'
         )
-        ( allDeclarations analysis )
+        ( outputableDeclarations analysis )
 
     reachableSet =
       reachable
         analysis
         ( Set.map DeclarationRoot roots <> filterImplicitRoots analysis ( implicitRoots analysis ) )
 
+    -- We only care about dead declarations if they have a span assigned,
+    -- since they don't show up in the output otherwise
     dead =
-      allDeclarations analysis Set.\\ reachableSet
+      outputableDeclarations analysis Set.\\ reachableSet
 
     warnings =
       Map.unionsWith (++) $
