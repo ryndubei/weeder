@@ -44,7 +44,6 @@ import Prelude hiding ( span )
 -- containers
 import Data.Map.Strict ( Map )
 import qualified Data.Map.Strict as Map
-import qualified Data.Map.Lazy as Map.Lazy
 import Data.Sequence ( Seq )
 import Data.Set ( Set )
 import qualified Data.Set as Set
@@ -363,7 +362,7 @@ define decl span = do
     #dependencyGraph %= overlay ( vertex decl )
 
 
--- Look up types of all declarations and add them lazily to typeDependencies
+-- Look up types of all declarations and add them to typeDependencies
 addTypeDependencies :: ( MonadState Analysis m, MonadReader AnalysisInfo m ) => HieAST TypeIndex -> m ()
 addTypeDependencies n = do
   for_ ( findIdentifiers' ( const True ) n )
@@ -374,7 +373,7 @@ addTypeDependencies n = do
               let names = typeToNames hieType
               for_ names \name ->
                 for (nameToDeclaration name) \typeDecl ->
-                  #typeDependencies %= Map.Lazy.insertWith Set.union d (Set.singleton typeDecl)
+                  #typeDependencies %= Map.insertWith Set.union d (Set.singleton typeDecl)
         Nothing -> pure ()
 
 
