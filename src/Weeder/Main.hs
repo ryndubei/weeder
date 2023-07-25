@@ -213,6 +213,8 @@ runWeeder weederConfig@Config{ rootPatterns, typeClassRoots, rootClasses, rootIn
     analysis = 
       execState ( analyseHieFiles weederConfig hieFiles ) emptyAnalysis
 
+    -- It wouldn't make sense to mark a declaration that cannot show up 
+    -- in the output as a root via a pattern
     roots =
       Set.filter
         ( \d ->
@@ -220,15 +222,17 @@ runWeeder weederConfig@Config{ rootPatterns, typeClassRoots, rootClasses, rootIn
               ( ( moduleNameString ( moduleName ( declModule d ) ) <> "." <> occNameString ( declOccName d ) ) =~ )
               rootPatterns
         )
-        ( allDeclarations analysis )
+        ( outputableDeclarations analysis )
 
     reachableSet =
       reachable
         analysis
         ( Set.map DeclarationRoot roots <> filterImplicitRoots analysis ( implicitRoots analysis ) )
 
+    -- We only care about dead declarations if they have a span assigned,
+    -- since they don't show up in the output otherwise
     dead =
-      allDeclarations analysis Set.\\ reachableSet
+      outputableDeclarations analysis Set.\\ reachableSet
 
     warnings =
       Map.unionsWith (++) $
