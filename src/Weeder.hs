@@ -44,6 +44,7 @@ import Prelude hiding ( span )
 -- containers
 import Data.Map.Strict ( Map )
 import qualified Data.Map.Strict as Map
+import qualified Data.Map.Lazy as Map.Lazy
 import Data.Sequence ( Seq )
 import Data.Set ( Set )
 import qualified Data.Set as Set
@@ -111,7 +112,7 @@ import GHC.Types.SrcLoc ( RealSrcSpan, realSrcSpanEnd, realSrcSpanStart )
 import Control.Lens ( (%=) )
 
 -- mtl
-import Control.Monad.State.Class ( MonadState )
+import Control.Monad.State.Class ( MonadState, gets )
 import Control.Monad.Reader.Class ( MonadReader, asks, ask)
 
 -- transformers
@@ -165,6 +166,9 @@ data Analysis =
       -- We capture a set of spans, because a declaration may be defined in
       -- multiple locations, e.g., a type signature for a function separate
       -- from its definition.
+    , typeDependencies :: Map Declaration ( Set Declaration )
+      -- ^ A mapping between declarations and the type constructors they depend on.
+      -- Will be empty unless unusedTypes is set to True.
     , implicitRoots :: Set Root
       -- ^ Stores information on Declarations that may be automatically marked
       -- as always reachable. This is used, for example, to capture knowledge 
@@ -192,7 +196,7 @@ data AnalysisInfo =
 
 -- | The empty analysis - the result of analysing zero @.hie@ files.
 emptyAnalysis :: Analysis
-emptyAnalysis = Analysis empty mempty mempty mempty mempty mempty
+emptyAnalysis = Analysis empty mempty mempty mempty mempty mempty mempty
 
 
 -- | A root for reachability analysis.
@@ -233,10 +237,11 @@ outputableDeclarations Analysis{ declarationSites } =
 analyseHieFile :: ( MonadState Analysis m, MonadReader AnalysisInfo m ) => m ()
 analyseHieFile = do
   HieFile{ hie_asts = HieASTs hieASTs, hie_exports, hie_module, hie_hs_file } <- asks currentHieFile
+  Config{ unusedTypes } <- asks weederConfig
   #modulePaths %= Map.insert hie_module hie_hs_file
 
   for_ hieASTs \ast -> do
-    addAllDeclarations ast
+    when unusedTypes $ addTypeDependencies ast
     topLevelAnalysis ast
 
   for_ hie_exports ( analyseExport hie_module )
@@ -325,7 +330,10 @@ analyseExport m = \case
 
 -- | @addDependency x y@ adds the information that @x@ depends on @y@.
 addDependency :: MonadState Analysis m => Declaration -> Declaration -> m ()
-addDependency x y =
+addDependency x y = do
+  typeDeps <- Map.lookup y <$> gets typeDependencies
+  for_ typeDeps $ traverse_ (addDependency x)
+
   #dependencyGraph %= overlay ( edge x y )
 
 
@@ -346,32 +354,28 @@ addInstanceRoot x t cls = do
 
 
 define :: MonadState Analysis m => Declaration -> RealSrcSpan -> m ()
-define decl span =
+define decl span = do
+  typeDeps <- Map.lookup decl <$> gets typeDependencies
+  for_ typeDeps $ traverse_ (addDependency decl)
+
   when ( realSrcSpanStart span /= realSrcSpanEnd span ) do
     #declarationSites %= Map.insertWith Set.union decl ( Set.singleton span )
     #dependencyGraph %= overlay ( vertex decl )
 
 
-addDeclaration :: MonadState Analysis m => Declaration -> m ()
-addDeclaration decl =
-  #dependencyGraph %= overlay ( vertex decl )
-
-
--- | Try and add vertices for all declarations in an AST - both
--- those declared here, and those referred to from here.
-addAllDeclarations :: ( MonadState Analysis m, MonadReader AnalysisInfo m ) => HieAST TypeIndex -> m ()
-addAllDeclarations n = do
-  Config{ unusedTypes } <- asks weederConfig
+-- Look up types of all declarations and add them lazily to typeDependencies
+addTypeDependencies :: ( MonadState Analysis m, MonadReader AnalysisInfo m ) => HieAST TypeIndex -> m ()
+addTypeDependencies n = do
   for_ ( findIdentifiers' ( const True ) n )
-    \(d, IdentifierDetails{ identType }, _) -> do
-      addDeclaration d
-      when unusedTypes $
-        case identType of
-          Just t -> do
-            hieType <- lookupType t
-            let names = typeToNames hieType
-            traverse_ (traverse_ (addDependency d) . nameToDeclaration) names
-          Nothing -> pure ()
+    \(d, IdentifierDetails{ identType }, _) ->
+      case identType of
+        Just t -> do
+              hieType <- lookupType t
+              let names = typeToNames hieType
+              for_ names \name ->
+                for (nameToDeclaration name) \typeDecl ->
+                  #typeDependencies %= Map.Lazy.insertWith Set.union d (Set.singleton typeDecl)
+        Nothing -> pure ()
 
 
 topLevelAnalysis :: ( MonadState Analysis m, MonadReader AnalysisInfo m ) => HieAST TypeIndex -> m ()
