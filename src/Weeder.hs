@@ -33,18 +33,16 @@ import Algebra.Graph.ToGraph ( dfs )
 import Control.Applicative ( Alternative )
 import Control.Monad ( guard, msum, when, unless )
 import Data.Traversable ( for )
-import Data.Maybe ( mapMaybe )
-import Data.Foldable ( for_, traverse_ )
+import Data.Maybe ( mapMaybe, listToMaybe )
+import Data.Foldable ( for_, traverse_, foldMap' )
 import Data.Function ( (&) )
 import Data.List ( intercalate )
-import Data.Monoid ( First( First ), getFirst )
 import GHC.Generics ( Generic )
 import Prelude hiding ( span )
 
 -- containers
 import Data.Map.Strict ( Map )
 import qualified Data.Map.Strict as Map
-import Data.Sequence ( Seq )
 import Data.Set ( Set )
 import qualified Data.Set as Set
 import Data.Tree (Tree)
@@ -77,7 +75,7 @@ import GHC.Iface.Ext.Types
   , Scope( ModuleScope )
   , RecFieldContext ( RecFieldOcc )
   , TypeIndex
-  , getSourcedNodeInfo
+  , getSourcedNodeInfo, NodeIdentifiers
   )
 import GHC.Iface.Ext.Utils
   ( EvidenceInfo( EvidenceInfo, evidenceVar )
@@ -86,7 +84,7 @@ import GHC.Iface.Ext.Utils
   , getEvidenceTree
   , generateReferencesMap
   , hieTypeToIface
-  , recoverFullType
+  , recoverFullType, flattenAst, sourcedNodeIdents
   )
 import GHC.Unit.Module ( Module, moduleStableString )
 import GHC.Utils.Outputable ( defaultSDocContext, showSDocOneLine )
@@ -417,7 +415,7 @@ analyseBinding n@Node{ nodeSpan } = do
   let bindAnns = Set.fromList [("FunBind", "HsBindLR"), ("PatBind", "HsBindLR")]
   guard $ any (annsContain n) bindAnns
 
-  for_ ( findDeclarations n ) \d -> do
+  for_ ( listToMaybe $ findDeclarations n ) \d -> do
     define d nodeSpan
 
     followEvidenceUses n d
@@ -436,7 +434,7 @@ analyseInstanceDeclaration :: ( Alternative m, MonadState Analysis m, MonadReade
 analyseInstanceDeclaration n@Node{ nodeSpan } = do
   guard $ annsContain n ("ClsInstD", "InstDecl")
 
-  for_ ( findEvInstBinds n ) \(d, cs, ids, _) -> do
+  for_ ( listToMaybe $ findEvInstBinds n ) \(d, cs, ids, _) -> do
     -- This makes instance declarations show up in 
     -- the output if type-class-roots is set to False.
     define d nodeSpan
@@ -454,7 +452,7 @@ analyseClassDeclaration :: ( Alternative m, MonadState Analysis m, MonadReader A
 analyseClassDeclaration n@Node{ nodeSpan } = do
   guard $ annsContain n ("ClassDecl", "TyClDecl")
 
-  for_ ( findIdentifiers isClassDeclaration n ) $ \d -> do
+  for_ ( listToMaybe $ findIdentifiers isClassDeclaration n ) $ \d -> do
     define d nodeSpan
 
     followEvidenceUses n d
@@ -479,8 +477,7 @@ analyseDataDeclaration n = do
   Config{ unusedTypes } <- asks weederConfig
 
   for_
-    ( foldMap
-        ( First . Just )
+    ( listToMaybe
         ( findIdentifiers ( any isDataDec ) n )
     )
     \dataTypeName -> do
@@ -490,12 +487,12 @@ analyseDataDeclaration n = do
       -- Without connecting constructors to the data declaration TypeAliasGADT.hs 
       -- fails with a false positive for A
       conDecs <- for ( constructors n ) \constructor ->
-        for ( foldMap ( First . Just ) ( findIdentifiers ( any isConDec ) constructor ) ) \conDec -> do
+        for ( listToMaybe ( findIdentifiers ( any isConDec ) constructor ) ) \conDec -> do
           addDependency conDec dataTypeName
           pure conDec
 
       -- To keep acyclicity in record declarations
-      let isDependent d = Just d `elem` fmap getFirst conDecs
+      let isDependent d = Just d `elem` conDecs
 
       for_ ( uses n ) (\d -> unless (isDependent d) $ addDependency dataTypeName d)
 
@@ -521,15 +518,15 @@ analyseDataDeclaration n = do
       _             -> False
 
 
-constructors :: HieAST a -> Seq ( HieAST a )
+constructors :: HieAST a -> [HieAST a]
 constructors = findNodeTypes "ConDecl"
 
 
-derivedInstances :: HieAST a -> Seq (Declaration, Set Name, IdentifierDetails a, HieAST a)
+derivedInstances :: HieAST a -> [(Declaration, Set Name, IdentifierDetails a, HieAST a)]
 derivedInstances n = findNodeTypes "HsDerivingClause" n >>= findEvInstBinds
 
 
-findNodeTypes :: String -> HieAST a -> Seq ( HieAST a )
+findNodeTypes :: String -> HieAST a -> [HieAST a]
 findNodeTypes t n@Node{ nodeChildren, sourcedNodeInfo } =
   if any (any ( (t ==) . unpackFS . nodeAnnotType) . nodeAnnotations) (getSourcedNodeInfo sourcedNodeInfo) then
     pure n
@@ -575,7 +572,7 @@ analyseFamilyDeclaration :: ( Alternative m, MonadState Analysis m ) => HieAST a
 analyseFamilyDeclaration n@Node{ nodeSpan } = do
   guard $ annsContain n ("FamDecl", "TyClDecl")
 
-  for_ ( findIdentifiers isFamDec n ) $ \d -> do
+  for_ ( listToMaybe $ findIdentifiers isFamDec n ) $ \d -> do
     define d nodeSpan
 
     for_ (uses n) (addDependency d)
@@ -617,7 +614,7 @@ analysePatternSynonyms n = do
   for_ ( findDeclarations n ) $ for_ ( uses n ) . addDependency
 
 
-findEvInstBinds :: HieAST a -> Seq (Declaration, Set Name, IdentifierDetails a, HieAST a)
+findEvInstBinds :: HieAST a -> [(Declaration, Set Name, IdentifierDetails a, HieAST a)]
 findEvInstBinds n = (\(d, ids, ast) -> (d, getClassNames ids, ids, ast)) <$>
   findIdentifiers'
     (   not
@@ -640,7 +637,7 @@ findEvInstBinds n = (\(d, ids, ast) -> (d, getClassNames ids, ids, ast)) <$>
       . identInfo
 
 
-findDeclarations :: HieAST a -> Seq Declaration
+findDeclarations :: HieAST a -> [Declaration]
 findDeclarations =
   findIdentifiers
     (   not
@@ -661,7 +658,7 @@ findDeclarations =
 findIdentifiers
   :: ( Set ContextInfo -> Bool )
   -> HieAST a
-  -> Seq Declaration
+  -> [Declaration]
 findIdentifiers f = fmap (\(d, _, _) -> d) . findIdentifiers' f
 
 
@@ -671,28 +668,23 @@ findIdentifiers f = fmap (\(d, _, _) -> d) . findIdentifiers' f
 findIdentifiers'
   :: ( Set ContextInfo -> Bool )
   -> HieAST a
-  -> Seq (Declaration, IdentifierDetails a, HieAST a)
-findIdentifiers' f n@Node{ sourcedNodeInfo, nodeChildren } =
-     foldMap
-       (\case
-           ( Left _, _ ) ->
-             mempty
+  -> [(Declaration, IdentifierDetails a, HieAST a)]
+findIdentifiers' f = foldMap decls . filter (any (f . identInfo) . idents) . flattenAst
+  where
+    idents :: HieAST a -> NodeIdentifiers a
+    idents = sourcedNodeIdents . sourcedNodeInfo
 
-           ( Right name, ids@IdentifierDetails{ identInfo } ) ->
-             if f identInfo then
-               (, ids, n) <$> foldMap pure (nameToDeclaration name)
-
-             else
-               mempty
-           )
-       (foldMap (Map.toList . nodeIdentifiers) (getSourcedNodeInfo sourcedNodeInfo))
-  <> foldMap ( findIdentifiers' f ) nodeChildren
+    decls :: HieAST a -> [(Declaration, IdentifierDetails a, HieAST a)]
+    decls n = Map.toList (idents n) & mapMaybe \case
+      (Left _, _) -> Nothing
+      (Right name, ids) -> (, ids, n) <$> nameToDeclaration name
 
 
 uses :: HieAST a -> Set Declaration
-uses =
-    foldMap Set.singleton
+uses = 
+    foldMap' Set.singleton 
   . findIdentifiers (any isUse)
+
 
 isUse :: ContextInfo -> Bool
 isUse = \case
