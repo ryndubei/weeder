@@ -14,7 +14,7 @@ module Weeder.Main ( main, mainWithConfig, getHieFiles, runWeeder, Weed(..) ) wh
 import Control.Monad ( guard, unless )
 import Data.Foldable
 import Data.Function ((&))
-import Data.List ( isSuffixOf, sortOn )
+import Data.List ( isSuffixOf, sortOn, unfoldr )
 import Data.Version ( showVersion )
 import System.Exit ( ExitCode(..), exitWith )
 import System.IO ( stderr, hPutStrLn, hPrint )
@@ -35,17 +35,19 @@ import System.FilePath ( isExtensionOf )
 
 -- ghc
 import GHC.Iface.Ext.Binary ( HieFileResult( HieFileResult, hie_file_result ), readHieFileWithVersion )
-import GHC.Iface.Ext.Types ( HieFile( hie_hs_file ), hieVersion )
+import GHC.Iface.Ext.Types ( HieFile( hie_hs_file, hie_asts ), hieVersion, HieASTs (getAsts) )
 import GHC.Unit.Module ( moduleName, moduleNameString )
 import GHC.Types.Name.Cache ( initNameCache, NameCache )
 import GHC.Types.Name ( occNameString )
-import GHC.Types.SrcLoc ( RealSrcLoc, realSrcSpanStart, srcLocLine )
 
 -- regex-tdfa
 import Text.Regex.TDFA ( (=~), matchTest, CompOption, ExecOption, defaultCompOpt, defaultExecOpt )
 
 -- optparse-applicative
 import Options.Applicative
+
+-- parallel
+import Control.Parallel.Strategies ( rdeepseq, parMap )
 
 -- text
 import qualified Data.Text.IO as T
@@ -59,6 +61,7 @@ import Weeder.Config
 import Paths_weeder (version)
 import Text.Regex.TDFA.ReadRegex (parseRegex)
 import Text.Regex.TDFA.TDFA (patternToRegex)
+import GHC.Iface.Ext.Utils (generateReferencesMap)
 
 
 data CLIArguments = CLIArguments
@@ -108,7 +111,7 @@ parseCLIArguments = do
 
 data Weed = Weed
   { weedPath :: FilePath
-  , weedLoc :: RealSrcLoc
+  , weedLoc :: Int
   , weedDeclaration :: Declaration
   , weedPrettyPrintedType :: Maybe String
   }
@@ -116,7 +119,7 @@ data Weed = Weed
 
 instance Show Weed where
   show Weed{..} =
-    weedPath <> ":" <> show ( srcLocLine weedLoc ) <> ": "
+    weedPath <> ":" <> show weedLoc <> ": "
       <> case weedPrettyPrintedType of
         Nothing -> occNameString ( declOccName weedDeclaration )
         Just t -> "(Instance) :: " <> t
@@ -212,8 +215,18 @@ getHieFiles hieExt hieDirectories requireHsFiles = do
 runWeeder :: Config -> [HieFile] -> ([Weed], Analysis)
 runWeeder weederConfig@Config{ rootPatterns, typeClassRoots, rootClasses, rootInstances } hieFiles =
   let 
+    asts = concatMap (Map.elems . getAsts . hie_asts) hieFiles
+
+    rf = generateReferencesMap asts
+
+    hieFiles' = 
+      splitEvery 100 hieFiles
+
+    analyses =
+      parMap rdeepseq (\hfs -> execState (analyseHieFiles rf weederConfig hfs) emptyAnalysis) hieFiles'
+
     analysis = 
-      execState ( analyseHieFiles weederConfig hieFiles ) emptyAnalysis
+      foldl' mappend mempty analyses
 
     -- regex-tdfa fails to optimise '=~' such that we don't compile rootPatterns every time:
     -- parseRegex takes up 15% of runtime from being run in 'roots' if we don't do this
@@ -247,16 +260,15 @@ runWeeder weederConfig@Config{ rootPatterns, typeClassRoots, rootClasses, rootIn
         ( \d ->
             fold $ do
               moduleFilePath <- Map.lookup ( declModule d ) ( modulePaths analysis )
-              spans <- Map.lookup d ( declarationSites analysis )
-              guard $ not $ null spans
-              let starts = map realSrcSpanStart $ Set.toList spans
-              return [ Map.singleton moduleFilePath ( liftA2 (,) starts (pure d) ) ]
+              starts <- Map.lookup d ( declarationSites analysis )
+              guard $ not $ null starts
+              return [ Map.singleton moduleFilePath ( liftA2 (,) (Set.toList starts) (pure d) ) ]
         )
         dead
 
     weeds =
       Map.toList warnings & concatMap \( weedPath, declarations ) ->
-        sortOn (srcLocLine . fst) declarations & map \( weedLoc, weedDeclaration ) ->
+        sortOn fst declarations & map \( weedLoc, weedDeclaration ) ->
           Weed { weedPrettyPrintedType = Map.lookup weedDeclaration (prettyPrintedType analysis)
                , weedPath
                , weedLoc
@@ -292,6 +304,12 @@ runWeeder weederConfig@Config{ rootPatterns, typeClassRoots, rootClasses, rootIn
 
           modulePathMatches :: String -> Bool
           modulePathMatches p = maybe False (=~ p) (Map.lookup ( declModule d ) modulePaths)
+
+
+splitEvery :: Int -> [a] -> [[a]]
+splitEvery n = unfoldr $ \case
+  [] -> Nothing
+  xs -> Just $ splitAt n xs
 
 
 -- | Recursively search for files with the given extension in given directory
