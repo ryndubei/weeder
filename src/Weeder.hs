@@ -13,7 +13,7 @@
 module Weeder
   ( -- * Analysis
     Analysis(..)
-  , analyseHieFiles
+  , analyseHieFile
   , emptyAnalysis
   , outputableDeclarations
 
@@ -260,8 +260,14 @@ initialGraph info =
 
 
 -- | Incrementally update 'Analysis' with information in a 'HieFile'.
-analyseHieFile :: ( MonadState Analysis m, MonadReader AnalysisInfo m ) => m ()
-analyseHieFile = do
+analyseHieFile :: (MonadState Analysis m) => RefMap TypeIndex -> Config -> HieFile -> m ()
+analyseHieFile rf weederConfig hieFile =
+  let info = AnalysisInfo hieFile weederConfig rf
+   in runReaderT analyseHieFile' info
+
+
+analyseHieFile' :: ( MonadState Analysis m, MonadReader AnalysisInfo m ) => m ()
+analyseHieFile' = do
   HieFile{ hie_asts = HieASTs hieASTs, hie_exports, hie_module, hie_hs_file } <- asks currentHieFile
   #modulePaths %= Map.insert hie_module hie_hs_file
   
@@ -316,14 +322,6 @@ typeToNames (Roll t) = case t of
 
     hieArgsTypes :: [(Bool, HieTypeFix)] -> Set Name
     hieArgsTypes = foldMap (typeToNames . snd) . filter fst
-
-
--- | Update 'Analysis' with information from a block of 'HieFile's
-analyseHieFiles :: (Foldable f, MonadState Analysis m) => RefMap TypeIndex -> Config -> f HieFile -> m ()
-analyseHieFiles rf weederConfig hieFiles = do
-  for_ hieFiles \hieFile -> do
-    let info = AnalysisInfo hieFile weederConfig rf
-    runReaderT analyseHieFile info
 
 
 analyseExport :: MonadState Analysis m => Module -> AvailInfo -> m ()

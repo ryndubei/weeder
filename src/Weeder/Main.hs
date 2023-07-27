@@ -14,7 +14,7 @@ module Weeder.Main ( main, mainWithConfig, getHieFiles, runWeeder, Weed(..) ) wh
 import Control.Monad ( guard, unless )
 import Data.Foldable
 import Data.Function ((&))
-import Data.List ( isSuffixOf, sortOn, unfoldr )
+import Data.List ( isSuffixOf, sortOn )
 import Data.Version ( showVersion )
 import System.Exit ( ExitCode(..), exitWith )
 import System.IO ( stderr, hPutStrLn, hPrint )
@@ -219,11 +219,8 @@ runWeeder weederConfig@Config{ rootPatterns, typeClassRoots, rootClasses, rootIn
 
     rf = generateReferencesMap asts
 
-    hieFiles' = 
-      splitEvery 100 hieFiles
-
     analyses =
-      parMap rdeepseq (\hfs -> execState (analyseHieFiles rf weederConfig hfs) emptyAnalysis) hieFiles'
+      parMap rdeepseq (\hf -> execState (analyseHieFile rf weederConfig hf) emptyAnalysis) hieFiles
 
     analysis = 
       foldl' mappend mempty analyses
@@ -304,12 +301,6 @@ runWeeder weederConfig@Config{ rootPatterns, typeClassRoots, rootClasses, rootIn
 
           modulePathMatches :: String -> Bool
           modulePathMatches p = maybe False (=~ p) (Map.lookup ( declModule d ) modulePaths)
-
-
-splitEvery :: Int -> [a] -> [[a]]
-splitEvery n = unfoldr $ \case
-  [] -> Nothing
-  xs -> Just $ splitAt n xs
 
 
 -- | Recursively search for files with the given extension in given directory
