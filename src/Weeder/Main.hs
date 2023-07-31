@@ -11,7 +11,8 @@
 module Weeder.Main ( main, mainWithConfig, getHieFiles, runWeeder, Weed(..) ) where
 
 -- base
-import Control.Monad ( guard, unless )
+import Control.Concurrent ( getChanContents, newChan, writeChan, forkIO )
+import Control.Monad ( guard, unless, when )
 import Data.Foldable
 import Data.Function ((&))
 import Data.List ( isSuffixOf, sortOn )
@@ -63,6 +64,7 @@ import Control.Monad.Trans.State.Strict ( execState )
 import Weeder
 import Weeder.Config
 import Paths_weeder (version)
+import Data.Maybe (isJust, catMaybes)
 
 
 data CLIArguments = CLIArguments
@@ -180,6 +182,7 @@ mainWithConfig hieExt hieDirectories requireHsFiles weederConfig = do
 
 -- | Find and read all .hie files in the given directories according to the given parameters,
 -- exiting if any are incompatible with the current version of GHC.
+-- The .hie files are returned as a lazy stream in the form of a list.
 getHieFiles :: String -> [FilePath] -> Bool -> IO [HieFile]
 getHieFiles hieExt hieDirectories requireHsFiles = do
   hieFilePaths <-
@@ -195,18 +198,26 @@ getHieFiles hieExt hieDirectories requireHsFiles = do
       then getFilesIn ".hs" "./."
       else pure []
 
+  hieFileResultsChan <- newChan
+
   nameCache <-
     initNameCache 'z' []
 
-  hieFileResults <-
-    mapM ( readCompatibleHieFileOrExit nameCache ) hieFilePaths
+  _ <- forkIO do
+    readHieFiles nameCache hieFilePaths hieFileResultsChan hsFilePaths
+    writeChan hieFileResultsChan Nothing
 
-  let
-    hieFileResults' = flip filter hieFileResults \hieFileResult ->
-      let hsFileExists = any ( hie_hs_file hieFileResult `isSuffixOf` ) hsFilePaths
-       in requireHsFiles ==> hsFileExists
+  catMaybes . takeWhile isJust <$> getChanContents hieFileResultsChan
 
-  pure hieFileResults'
+  where
+
+    readHieFiles nameCache hieFilePaths hieFileResultsChan hsFilePaths =
+      for_ hieFilePaths \hieFilePath -> do
+        hieFileResult <-
+          readCompatibleHieFileOrExit nameCache hieFilePath
+        let hsFileExists = any ( hie_hs_file hieFileResult `isSuffixOf` ) hsFilePaths
+        when (requireHsFiles ==> hsFileExists) $
+          writeChan hieFileResultsChan (Just hieFileResult)
 
 
 -- | Run Weeder on the given .hie files with the given 'Config'.
@@ -228,6 +239,8 @@ runWeeder weederConfig@Config{ rootPatterns, typeClassRoots, rootClasses, rootIn
         then id
         else analyseEvidenceUses rf
 
+    -- Evaluating 'analyses' first allows us to begin analysis 
+    -- while hieFiles is still being read (since rf depends on all hie files)
     analysis = analyses `pseq`
       analyseEvidenceUses' (foldl' mappend mempty analyses)
 
