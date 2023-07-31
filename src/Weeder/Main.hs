@@ -239,10 +239,13 @@ runWeeder weederConfig@Config{ rootPatterns, typeClassRoots, rootClasses, rootIn
         then id
         else analyseEvidenceUses rf
 
-    -- Evaluating 'analyses' first allows us to begin analysis 
+    analysis1 = 
+      foldl' mappend mempty analyses
+
+    -- Evaluating 'analysis1' first allows us to begin analysis 
     -- while hieFiles is still being read (since rf depends on all hie files)
-    analysis = analyses `pseq`
-      analyseEvidenceUses' (foldl' mappend mempty analyses)
+    analysis = analysis1 `pseq`
+      analyseEvidenceUses' analysis1
 
     -- regex-tdfa fails to optimise '=~' such that we don't compile rootPatterns every time:
     -- parseRegex takes up 15% of runtime from being run in 'roots' if we don't do this
