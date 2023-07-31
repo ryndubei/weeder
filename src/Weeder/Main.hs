@@ -220,7 +220,7 @@ runWeeder weederConfig@Config{ rootPatterns, typeClassRoots, rootClasses, rootIn
     rf = generateReferencesMap asts
 
     analyses =
-      parMap rdeepseq (\hf -> execState (analyseHieFile rf weederConfig hf) emptyAnalysis) hieFiles
+      parMap rdeepseq (\hf -> execState (analyseHieFile weederConfig hf) emptyAnalysis) hieFiles
 
     analysis = 
       foldl' mappend mempty analyses
