@@ -36,12 +36,15 @@ import System.FilePath ( isExtensionOf )
 -- ghc
 import GHC.Iface.Ext.Binary ( HieFileResult( HieFileResult, hie_file_result ), readHieFileWithVersion )
 import GHC.Iface.Ext.Types ( HieFile( hie_hs_file, hie_asts ), hieVersion, HieASTs (getAsts) )
+import GHC.Iface.Ext.Utils ( generateReferencesMap )
 import GHC.Unit.Module ( moduleName, moduleNameString )
 import GHC.Types.Name.Cache ( initNameCache, NameCache )
 import GHC.Types.Name ( occNameString )
 
 -- regex-tdfa
 import Text.Regex.TDFA ( (=~), matchTest, CompOption, ExecOption, defaultCompOpt, defaultExecOpt )
+import Text.Regex.TDFA.ReadRegex ( parseRegex )
+import Text.Regex.TDFA.TDFA ( patternToRegex )
 
 -- optparse-applicative
 import Options.Applicative
@@ -59,9 +62,6 @@ import Control.Monad.Trans.State.Strict ( execState )
 import Weeder
 import Weeder.Config
 import Paths_weeder (version)
-import Text.Regex.TDFA.ReadRegex (parseRegex)
-import Text.Regex.TDFA.TDFA (patternToRegex)
-import GHC.Iface.Ext.Utils (generateReferencesMap)
 
 
 data CLIArguments = CLIArguments
