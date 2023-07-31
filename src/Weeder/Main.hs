@@ -16,6 +16,7 @@ import Control.Monad ( guard, unless, when )
 import Data.Foldable
 import Data.Function ((&))
 import Data.List ( isSuffixOf, sortOn )
+import Data.Maybe ( isJust, catMaybes )
 import Data.Version ( showVersion )
 import System.Exit ( ExitCode(..), exitWith )
 import System.IO ( stderr, hPutStrLn, hPrint )
@@ -64,7 +65,6 @@ import Control.Monad.Trans.State.Strict ( execState )
 import Weeder
 import Weeder.Config
 import Paths_weeder (version)
-import Data.Maybe (isJust, catMaybes)
 
 
 data CLIArguments = CLIArguments
