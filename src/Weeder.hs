@@ -725,9 +725,14 @@ unNodeAnnotation (NodeAnnotation x y) = (unpackFS x, unpackFS y)
 
 
 -- | Add evidence uses found under the given node to 'requestedEvidence'.
-requestEvidence :: ( MonadState Analysis m ) => HieAST a -> Declaration -> m ()
-requestEvidence n d =
-  #requestedEvidence %= Map.insertWith (<>) d (Set.fromList names)
+requestEvidence :: ( MonadState Analysis m, MonadReader AnalysisInfo m ) => HieAST a -> Declaration -> m ()
+requestEvidence n d = do
+  Config{ typeClassRoots } <- asks weederConfig
+
+  -- If type-class-roots flag is set then we don't need to follow
+  -- evidence uses as the binding sites will be roots anyway
+  unless typeClassRoots $
+    #requestedEvidence %= Map.insertWith (<>) d (Set.fromList names)
 
   where
 
