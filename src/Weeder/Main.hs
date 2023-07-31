@@ -50,6 +50,7 @@ import Text.Regex.TDFA.TDFA ( patternToRegex )
 import Options.Applicative
 
 -- parallel
+import Control.Parallel (pseq)
 import Control.Parallel.Strategies ( rdeepseq, parMap )
 
 -- text
@@ -147,8 +148,8 @@ main = do
       hPrint stderr e
       exitWith (ExitFailure 3)
 
-    decodeConfig noDefaultFields = 
-      if noDefaultFields 
+    decodeConfig noDefaultFields =
+      if noDefaultFields
         then fmap (TOML.decodeWith decodeNoDefaults) . T.readFile
         else TOML.decodeFile
 
@@ -168,10 +169,10 @@ mainWithConfig hieExt hieDirectories requireHsFiles weederConfig = do
   hieFiles <-
     getHieFiles hieExt hieDirectories requireHsFiles
 
-  let 
-    (weeds, _) = 
+  let
+    (weeds, _) =
       runWeeder weederConfig hieFiles
-    
+
   mapM_ print weeds
 
   unless (null weeds) $ exitWith (ExitFailure 228)
@@ -214,7 +215,7 @@ getHieFiles hieExt hieDirectories requireHsFiles = do
 -- 'Show' instance, and the final 'Analysis'.
 runWeeder :: Config -> [HieFile] -> ([Weed], Analysis)
 runWeeder weederConfig@Config{ rootPatterns, typeClassRoots, rootClasses, rootInstances } hieFiles =
-  let 
+  let
     asts = concatMap (Map.elems . getAsts . hie_asts) hieFiles
 
     rf = generateReferencesMap asts
@@ -222,12 +223,17 @@ runWeeder weederConfig@Config{ rootPatterns, typeClassRoots, rootClasses, rootIn
     analyses =
       parMap rdeepseq (\hf -> execState (analyseHieFile weederConfig hf) emptyAnalysis) hieFiles
 
-    analysis = 
-      foldl' mappend mempty analyses
+    analyseEvidenceUses' = 
+      if typeClassRoots
+        then id
+        else analyseEvidenceUses rf
+
+    analysis = analyses `pseq`
+      analyseEvidenceUses' (foldl' mappend mempty analyses)
 
     -- regex-tdfa fails to optimise '=~' such that we don't compile rootPatterns every time:
     -- parseRegex takes up 15% of runtime from being run in 'roots' if we don't do this
-    rootPatterns' = map (either (error . show) (\p -> patternToRegex p regexComp regexExec) . parseRegex) $ 
+    rootPatterns' = map (either (error . show) (\p -> patternToRegex p regexComp regexExec) . parseRegex) $
       Set.toList rootPatterns
 
     -- It wouldn't make sense to mark a declaration that cannot show up 
@@ -277,7 +283,7 @@ runWeeder weederConfig@Config{ rootPatterns, typeClassRoots, rootClasses, rootIn
   where
 
     regexComp :: CompOption
-    regexComp = defaultCompOpt 
+    regexComp = defaultCompOpt
 
     regexExec :: ExecOption
     regexExec = defaultExecOpt
