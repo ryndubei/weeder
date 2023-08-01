@@ -5,15 +5,13 @@
 {-# language OverloadedStrings #-}
 {-# language LambdaCase #-}
 {-# language RecordWildCards #-}
-{-# language GeneralisedNewtypeDeriving #-}
-{-# language PatternSynonyms #-}
 
 -- | This module provides an entry point to the Weeder executable.
 
 module Weeder.Main ( main, mainWithConfig, getHieFiles, runWeeder, Weed(..), formatWeed ) where
 
 -- base
-import Control.Exception ( Exception, throwIO, Handler (Handler), catches )
+import Control.Exception ( Exception, throwIO, Handler (Handler), catches, displayException )
 import Control.Monad ( guard, unless, when )
 import Data.Foldable
 import Data.Function ((&))
@@ -62,20 +60,32 @@ import Weeder.Config
 import Paths_weeder (version)
 
 
--- | We wrap ExitCode in this to enforce our own exit codes.
-newtype WeederException = WeederException ExitCode
-  deriving (Show, Exception)
+data WeederException 
+  = ExitNoHieFilesFailure
+  | ExitHieVersionFailure String
+  | ExitConfigFailure String
+  | ExitWeedsFound
+  deriving Show
 
 
-pattern WeederFailure :: Int -> WeederException
-pattern WeederFailure a = WeederException (ExitFailure a)
+instance Exception WeederException where
+  displayException = \case
+    ExitNoHieFilesFailure -> noHieFilesFoundMessage
+    ExitHieVersionFailure s -> s
+    ExitConfigFailure s -> s
+    ExitWeedsFound -> mempty
+    where
+      noHieFilesFoundMessage =  
+        "No HIE files found: check that the directory is correct " ++
+        "and that the -fwrite-ide-info compilation flag is set."
 
 
-pattern ExitHieVersionFailure, ExitConfigFailure, ExitNoHieFilesFailure, ExitWeedsFound :: WeederException
-pattern ExitHieVersionFailure = WeederFailure 2
-pattern ExitConfigFailure = WeederFailure 3
-pattern ExitNoHieFilesFailure = WeederFailure 4
-pattern ExitWeedsFound = WeederFailure 228
+weederExitCode :: WeederException -> ExitCode
+weederExitCode = \case
+  ExitWeedsFound -> ExitFailure 228
+  ExitHieVersionFailure _ -> ExitFailure 2
+  ExitConfigFailure _ -> ExitFailure 3
+  ExitNoHieFilesFailure -> ExitFailure 4
 
 
 exitWeeder :: WeederException -> IO a
@@ -89,9 +99,11 @@ handleWeeder a = catches a handlers
       [ Handler handleWeederException
       , Handler handleExitCode
       ]
-    handleWeederException (WeederException e) = exitWith e
     handleExitCode (ExitFailure _) = exitWith (ExitFailure 1)
     handleExitCode ExitSuccess = exitSuccess
+    handleWeederException w = do
+      hPrint stderr (displayException w)
+      exitWith (weederExitCode w)
 
 
 data CLIArguments = CLIArguments
@@ -173,9 +185,8 @@ main = handleWeeder do
     >>= either handleConfigError pure
     >>= mainWithConfig hieExt hieDirectories requireHsFiles
   where
-    handleConfigError e = do
-      hPrint stderr e
-      exitWeeder ExitConfigFailure
+    handleConfigError e =
+      exitWeeder $ ExitConfigFailure (show e)
 
     decodeConfig noDefaultFields =
       if noDefaultFields
@@ -198,11 +209,7 @@ mainWithConfig hieExt hieDirectories requireHsFiles weederConfig = handleWeeder 
   hieFiles <-
     getHieFiles hieExt hieDirectories requireHsFiles
 
-  when (null hieFiles) do
-    hPutStrLn stderr $
-      "No HIE files found: check that the directory is correct " ++
-      "and that the -fwrite-ide-info compilation flag is set."
-    exitWeeder ExitNoHieFilesFailure
+  when (null hieFiles) $ exitWeeder ExitNoHieFilesFailure
 
   let
     (weeds, _) =
@@ -367,14 +374,16 @@ readCompatibleHieFileOrExit nameCache path = do
     Right HieFileResult{ hie_file_result } ->
       return hie_file_result
     Left ( v, _ghcVersion ) -> do
-      putStrLn $ "incompatible hie file: " <> path
-      putStrLn $ "    this version of weeder was compiled with GHC version "
-               <> show hieVersion
-      putStrLn $ "    the hie files in this project were generated with GHC version "
-               <> show v
-      putStrLn $ "    weeder must be built with the same GHC version"
-               <> " as the project it is used on"
-      exitWeeder ExitHieVersionFailure
+      let msg = unlines
+            [ "incompatible hie file: " <> path
+            , "    this version of weeder was compiled with GHC version "
+              <> show hieVersion
+            , "    the hie files in this project were generated with GHC version "
+              <> show v
+            , "    weeder must be built with the same GHC version"
+              <> " as the project it is used on"
+            ]
+      exitWeeder $ ExitHieVersionFailure msg
 
 
 infixr 5 ==>
