@@ -38,9 +38,8 @@ data Config = Config
     -- ^ Any declarations matching these regular expressions will be added to
     -- the root set.
   , typeClassRoots :: Bool
-    -- ^ If True, consider all declarations in a type class as part of the root
-    -- set. Weeder is currently unable to identify whether or not a type class
-    -- instance is used - enabling this option can prevent false positives.
+    -- ^ If True, consider all declarations of type class instances as part of 
+    -- the root set. Overrides rootClasses and rootInstances.
   , rootClasses :: Set PatternWithModule
     -- ^ All instances of type classes matching these regular expressions will
     -- be added to the root set. Note that this does not mark the class itself

@@ -121,9 +121,14 @@ parseCLIArguments = do
 
 data Weed = Weed
   { weedPath :: FilePath
+    -- ^ Path to the weed
   , weedLoc :: Int
+    -- ^ Line number
   , weedDeclaration :: Declaration
+    -- ^ The unused declaration
   , weedPrettyPrintedType :: Maybe String
+    -- ^ Pretty-printed type of the declaration -
+    -- currently only for displaying type class instances
   }
 
 
@@ -195,7 +200,8 @@ mainWithConfig hieExt hieDirectories requireHsFiles weederConfig = do
 
 -- | Find and read all .hie files in the given directories according to the given parameters,
 -- exiting if any are incompatible with the current version of GHC.
--- The .hie files are returned as a lazy stream in the form of a list.
+--
+-- The list of hie files is returned while it is still being read.
 getHieFiles :: String -> [FilePath] -> Bool -> IO [HieFile]
 getHieFiles hieExt hieDirectories requireHsFiles = do
   hieFilePaths <-
@@ -244,6 +250,8 @@ runWeeder weederConfig@Config{ rootPatterns, typeClassRoots, rootClasses, rootIn
 
     rf = generateReferencesMap asts
 
+    -- Evaluating 1 HieFile at a time has almost identical performance to 
+    -- doing this in batches of 100
     analyses =
       parMap rdeepseq (\hf -> execState (analyseHieFile weederConfig hf) emptyAnalysis) hieFiles
 
@@ -260,13 +268,15 @@ runWeeder weederConfig@Config{ rootPatterns, typeClassRoots, rootClasses, rootIn
     analysis = analysis1 `pseq`
       analyseEvidenceUses' analysis1
 
-    -- regex-tdfa fails to optimise '=~' such that we don't compile rootPatterns every time:
-    -- parseRegex takes up 15% of runtime from being run in 'roots' if we don't do this
+    -- regex parsing takes up 15% of runtime from being run in 'roots' if we 
+    -- just use 'rootPatterns' with '=~', as we recompile the regex every time
     rootPatterns' = map (either (error . show) (\p -> patternToRegex p regexComp regexExec) . parseRegex) $
       Set.toList rootPatterns
 
-    -- It wouldn't make sense to mark a declaration that cannot show up 
-    -- in the output as a root via a pattern
+    -- We limit ourselves to outputable declarations only rather than all
+    -- declarations in the graph. This has a slight performance benefit,
+    -- at the cost of having to assume that a non-outputable declaration
+    -- will always either be an implicit root or irrelevant.
     roots =
       Set.filter
         ( \d ->
