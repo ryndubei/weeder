@@ -44,7 +44,7 @@ import GHC.Types.Name.Cache ( initNameCache, NameCache )
 import GHC.Types.Name ( occNameString )
 
 -- regex-tdfa
-import Text.Regex.TDFA ( (=~), matchTest, CompOption, ExecOption, defaultCompOpt, defaultExecOpt )
+import Text.Regex.TDFA ( (=~), matchTest, CompOption, ExecOption, defaultCompOpt, defaultExecOpt, Regex )
 import Text.Regex.TDFA.ReadRegex ( parseRegex )
 import Text.Regex.TDFA.TDFA ( patternToRegex )
 
@@ -270,8 +270,8 @@ runWeeder weederConfig@Config{ rootPatterns, typeClassRoots, rootClasses, rootIn
 
     -- regex parsing takes up 15% of runtime from being run in 'roots' if we 
     -- just use 'rootPatterns' with '=~', as we recompile the regex every time
-    rootPatterns' = map (either (error . show) (\p -> patternToRegex p regexComp regexExec) . parseRegex) $
-      Set.toList rootPatterns
+    rootPatterns' = 
+      map compileRegex (Set.toList rootPatterns)
 
     -- We limit ourselves to outputable declarations only rather than all
     -- declarations in the graph. This has a slight performance benefit,
@@ -326,6 +326,9 @@ runWeeder weederConfig@Config{ rootPatterns, typeClassRoots, rootClasses, rootIn
 
     regexExec :: ExecOption
     regexExec = defaultExecOpt
+    
+    compileRegex :: String -> Regex
+    compileRegex = either (error . show) (\p -> patternToRegex p regexComp regexExec) . parseRegex
 
     filterImplicitRoots :: Analysis -> Set Root -> Set Root
     filterImplicitRoots Analysis{ prettyPrintedType, modulePaths } = Set.filter $ \case
