@@ -8,7 +8,7 @@
 
 -- | This module provides an entry point to the Weeder executable.
 
-module Weeder.Main ( main, mainWithConfig, getHieFiles, runWeeder, Weed(..) ) where
+module Weeder.Main ( main, mainWithConfig, getHieFiles, runWeeder, Weed(..), formatWeed ) where
 
 -- base
 import Control.Concurrent ( getChanContents, newChan, writeChan, forkIO )
@@ -67,6 +67,13 @@ import Weeder.Config
 import Paths_weeder (version)
 
 
+exitHieVersionFailure, exitConfigFailure, exitWeedsFound, exitNoHieFilesFailure :: ExitCode
+exitHieVersionFailure = ExitFailure 2
+exitConfigFailure = ExitFailure 3
+exitNoHieFilesFailure = ExitFailure 4
+exitWeedsFound = ExitFailure 228
+
+
 data CLIArguments = CLIArguments
   { configPath :: FilePath
   , hieExt :: String
@@ -120,12 +127,12 @@ data Weed = Weed
   }
 
 
-instance Show Weed where
-  show Weed{..} =
-    weedPath <> ":" <> show weedLoc <> ": "
-      <> case weedPrettyPrintedType of
-        Nothing -> occNameString ( declOccName weedDeclaration )
-        Just t -> "(Instance) :: " <> t
+formatWeed :: Weed -> String
+formatWeed Weed{..} =
+  weedPath <> ":" <> show weedLoc <> ": "
+    <> case weedPrettyPrintedType of
+      Nothing -> occNameString ( declOccName weedDeclaration )
+      Just t -> "(Instance) :: " <> t
 
 
 -- | Parse command line arguments and into a 'Config' and run 'mainWithConfig'.
@@ -148,7 +155,7 @@ main = do
   where
     handleConfigError e = do
       hPrint stderr e
-      exitWith (ExitFailure 3)
+      exitWith exitConfigFailure
 
     decodeConfig noDefaultFields =
       if noDefaultFields
@@ -171,13 +178,19 @@ mainWithConfig hieExt hieDirectories requireHsFiles weederConfig = do
   hieFiles <-
     getHieFiles hieExt hieDirectories requireHsFiles
 
-  let
-    (weeds, _) =
+  when (null hieFiles) do
+    hPutStrLn stderr $
+      "No HIE files found: check that the directory is correct " ++
+      "and that the -fwrite-ide-info compilation flag is set."
+    exitWith exitNoHieFilesFailure
+
+  let 
+    (weeds, _) = 
       runWeeder weederConfig hieFiles
+    
+  mapM_ (putStrLn . formatWeed) weeds
 
-  mapM_ print weeds
-
-  unless (null weeds) $ exitWith (ExitFailure 228)
+  unless (null weeds) $ exitWith exitWeedsFound
 
 
 -- | Find and read all .hie files in the given directories according to the given parameters,
@@ -222,8 +235,8 @@ getHieFiles hieExt hieDirectories requireHsFiles = do
 
 -- | Run Weeder on the given .hie files with the given 'Config'.
 --
--- Returns a list of 'Weed's that can be displayed using their
--- 'Show' instance, and the final 'Analysis'.
+-- Returns a list of 'Weed's that can be displayed using
+-- 'formatWeed', and the final 'Analysis'.
 runWeeder :: Config -> [HieFile] -> ([Weed], Analysis)
 runWeeder weederConfig@Config{ rootPatterns, typeClassRoots, rootClasses, rootInstances } hieFiles =
   let
@@ -381,7 +394,7 @@ readCompatibleHieFileOrExit nameCache path = do
                <> show v
       putStrLn $ "    weeder must be built with the same GHC version"
                <> " as the project it is used on"
-      exitWith (ExitFailure 2)
+      exitWith exitHieVersionFailure
 
 
 infixr 5 ==>
