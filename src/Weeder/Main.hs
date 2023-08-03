@@ -8,7 +8,22 @@
 
 -- | This module provides an entry point to the Weeder executable.
 
-module Weeder.Main ( main, mainWithConfig, getHieFiles, runWeeder, Weed(..), formatWeed ) where
+module Weeder.Main 
+  ( -- * Main
+    main
+  , mainWithConfig
+    -- * Weeder
+  , runWeeder
+  , Weed(..)
+  , formatWeed 
+    -- * Utilities
+  , getHieFiles
+    -- * Exceptions
+  , WeederException(..)
+  , weederExitCode
+  , handleExits
+  ) 
+   where
 
 -- base
 import Control.Exception ( Exception, throwIO, Handler (Handler), catches, displayException )
@@ -102,10 +117,8 @@ instance Exception WeederException where
         ]
 
 
-exitWeeder :: WeederException -> IO a
-exitWeeder = throwIO
-
-
+-- Converts any 'WeederException' to its corresponding 'ExitCode' and 
+-- prints an error message to stderr.
 handleExits :: IO a -> IO a
 handleExits a = catches a handlers
   where
@@ -200,7 +213,7 @@ main = handleExits do
     >>= mainWithConfig hieExt hieDirectories requireHsFiles
   where
     handleConfigError e =
-      exitWeeder $ ExitConfigFailure (show e)
+      throwIO $ ExitConfigFailure (show e)
 
     decodeConfig noDefaultFields =
       if noDefaultFields
@@ -218,12 +231,15 @@ main = handleExits do
 --
 -- This will recursively find all files with the given extension in the given directories, perform
 -- analysis, and report all unused definitions according to the 'Config'.
+--
+-- Does not guarantee any specific exit code on failure: compose with 'handleExits' to convert
+-- 'WeederException' any to an 'ExitCode' and print an error message.
 mainWithConfig :: String -> [FilePath] -> Bool -> Config -> IO ()
 mainWithConfig hieExt hieDirectories requireHsFiles weederConfig = do
   hieFiles <-
     getHieFiles hieExt hieDirectories requireHsFiles
 
-  when (null hieFiles) $ exitWeeder ExitNoHieFilesFailure
+  when (null hieFiles) $ throwIO ExitNoHieFilesFailure
 
   let
     (weeds, _) =
@@ -231,7 +247,7 @@ mainWithConfig hieExt hieDirectories requireHsFiles weederConfig = do
 
   mapM_ (putStrLn . formatWeed) weeds
 
-  unless (null weeds) $ exitWeeder ExitWeedsFound
+  unless (null weeds) $ throwIO ExitWeedsFound
 
 
 -- | Find and read all .hie files in the given directories according to the given parameters,
@@ -388,7 +404,7 @@ readCompatibleHieFileOrExit nameCache path = do
     Right HieFileResult{ hie_file_result } ->
       return hie_file_result
     Left ( v, _ghcVersion ) ->
-      exitWeeder $ ExitHieVersionFailure path v
+      throwIO $ ExitHieVersionFailure path v
 
 
 infixr 5 ==>
