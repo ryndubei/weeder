@@ -44,9 +44,7 @@ import GHC.Types.Name.Cache ( initNameCache, NameCache )
 import GHC.Types.Name ( occNameString )
 
 -- regex-tdfa
-import Text.Regex.TDFA ( (=~), matchTest, CompOption, ExecOption, defaultCompOpt, defaultExecOpt, Regex )
-import Text.Regex.TDFA.ReadRegex ( parseRegex )
-import Text.Regex.TDFA.TDFA ( patternToRegex )
+import Text.Regex.TDFA ( matchTest )
 
 -- optparse-applicative
 import Options.Applicative
@@ -268,11 +266,6 @@ runWeeder weederConfig@Config{ rootPatterns, typeClassRoots, rootInstances } hie
     analysis = analysis1 `pseq`
       analyseEvidenceUses' analysis1
 
-    -- regex parsing takes up 15% of runtime from being run in 'roots' if we 
-    -- just use 'rootPatterns' with '=~', as we recompile the regex every time
-    rootPatterns' = 
-      map compileRegex (Set.toList rootPatterns)
-
     -- We limit ourselves to outputable declarations only rather than all
     -- declarations in the graph. This has a slight performance benefit,
     -- at the cost of having to assume that a non-outputable declaration
@@ -282,7 +275,7 @@ runWeeder weederConfig@Config{ rootPatterns, typeClassRoots, rootInstances } hie
         ( \d ->
             any
               (`matchTest` displayDeclaration d)
-              rootPatterns'
+              rootPatterns
         )
         ( outputableDeclarations analysis )
 
@@ -321,15 +314,6 @@ runWeeder weederConfig@Config{ rootPatterns, typeClassRoots, rootInstances } hie
 
   where
 
-    regexComp :: CompOption
-    regexComp = defaultCompOpt
-
-    regexExec :: ExecOption
-    regexExec = defaultExecOpt
-    
-    compileRegex :: String -> Regex
-    compileRegex = either (error . show) (\p -> patternToRegex p regexComp regexExec) . parseRegex
-
     filterImplicitRoots :: Analysis -> Set Root -> Set Root
     filterImplicitRoots Analysis{ prettyPrintedType, modulePaths } = Set.filter $ \case
       DeclarationRoot _ -> True -- keep implicit roots for rewrite rules etc
@@ -340,18 +324,16 @@ runWeeder weederConfig@Config{ rootPatterns, typeClassRoots, rootInstances } hie
         where
           matchingType = 
             let mt = Map.lookup d prettyPrintedType
-                matches = maybe (const False) (=~) mt
+                matches = maybe (const False) (flip matchTest) mt
             in any (maybe True matches) filteredInstances
 
-          filteredInstances :: Set (Maybe String)
           filteredInstances = 
-            Set.map instancePattern 
-            . Set.filter (maybe True (displayDeclaration c =~) . classPattern) 
-            . Set.filter (maybe True modulePathMatches . modulePattern) 
+            map instancePattern 
+            . filter (maybe True (`matchTest` displayDeclaration c) . classPattern) 
+            . filter (maybe True modulePathMatches . modulePattern) 
             $ rootInstances
 
-          modulePathMatches :: String -> Bool
-          modulePathMatches p = maybe False (=~ p) (Map.lookup ( declModule d ) modulePaths)
+          modulePathMatches p = maybe False (p `matchTest`) (Map.lookup ( declModule d ) modulePaths)
 
 
 displayDeclaration :: Declaration -> String
