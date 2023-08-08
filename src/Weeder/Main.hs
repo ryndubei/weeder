@@ -54,7 +54,7 @@ import qualified Data.Text.IO as T
 import Control.Monad.Trans.State.Strict ( execState )
 
 -- weeder
-import Weeder
+import Weeder.Analysis
 import Weeder.Config
 import Paths_weeder (version)
 
