@@ -5,10 +5,11 @@
 {-# language ConstraintKinds #-}
 {-# language FlexibleContexts #-}
 {-# language DataKinds #-}
+{-# language GADTs #-}
 
 module Weeder.Types 
   ( Declaration(..)
-  , TopLevelNode(..)
+  , NodeTrait(..)
   , IdentifierTrait(..)
   , WeederAST(..)
   , WeederAST'
@@ -61,7 +62,9 @@ declarationStableName Declaration { declModule, declOccName } =
     intercalate "$" [ namespace, moduleStableString declModule, "$", occNameString declOccName ]
 
 
-data TopLevelNode
+-- | Traits of 'WeederNode' that Weeder is interested in.
+data NodeTrait
+  -- top-level nodes
   = Binding
   | ClassDeclaration
   | ClassInstance
@@ -73,9 +76,13 @@ data TopLevelNode
   | TypeInstance
   | TypeSignature
   | TypeSynonym
+  -- subnodes
+  | Constructor
+  | DerivingClause
   deriving ( Eq, Show )
 
 
+-- | Traits of 'WeederIdentifier' that Weeder is interested in.
 data IdentifierTrait
   = Dependency
   | FamilyDeclaration
@@ -89,8 +96,10 @@ class WeederAST a where
   data WeederNode a
   toWeederAST :: a -> Tree (WeederNode a)
 
-  -- | A 'WeederNode' may be a 'TopLevelNode'
-  toTopLevel :: WeederNode a -> Maybe TopLevelNode
+  -- | A 'WeederNode' may have traits describing how it
+  -- should be handled. Normally, it will have just one
+  -- trait.
+  nodeTraits :: WeederNode a -> Set NodeTrait
 
   -- | Each 'WeederNode' may contain 'WeederIdentifier's
   data WeederIdentifier a
@@ -100,7 +109,8 @@ class WeederAST a where
   toDeclaration :: WeederIdentifier a -> Maybe Declaration
 
   -- | A 'WeederIdentifier' may possess several 'IdentifierTrait's.
-  -- We can therefore filter a 'WeederAST' by these traits.
+  -- We can therefore filter a 'WeederAST' for identifiers by these
+  -- traits.
   identTraits :: WeederIdentifier a -> Set IdentifierTrait
 
   -- | Summarised information about all 'WeederAST's. Reveals
