@@ -114,7 +114,7 @@ import Control.Monad.Trans.Maybe ( runMaybeT )
 import Control.Monad.Trans.Reader ( runReaderT )
 
 -- weeder
-import Weeder.Types
+import Weeder.Types ( Declaration(..) )
 import Weeder.Config ( Config, ConfigType( Config, typeClassRoots, unusedTypes ) )
 
 

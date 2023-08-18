@@ -5,24 +5,27 @@
 {-# language ConstraintKinds #-}
 {-# language FlexibleContexts #-}
 {-# language DataKinds #-}
-{-# language GADTs #-}
+{-# language ApplicativeDo #-}
 
-module Weeder.Types 
+module Weeder.Types
   ( Declaration(..)
   , NodeTrait(..)
   , IdentifierTrait(..)
   , WeederAST(..)
   , WeederAST'
-  ) 
+  , topLevelAnalysis
+  )
    where
 
 -- base
+import Control.Applicative ( Alternative, asum, (<|>) )
 import Data.List ( intercalate )
 import GHC.Generics ( Generic )
 
 -- containers
-import Data.Tree ( Tree )
+import Data.Tree ( Tree(Node), rootLabel, subForest )
 import Data.Set ( Set )
+import qualified Data.Set as Set
 
 -- ghc
 import GHC.Plugins
@@ -135,4 +138,22 @@ class WeederAST a where
 
 
 -- | Shortcut for 'WeederAST' and some useful constraints on its data families
-type WeederAST' a = (WeederAST a, Eq (WeederType a))
+type WeederAST' a = (WeederAST a, Eq (WeederType a), Outputable (WeederType a))
+
+
+-- | Try to execute some potentially-failing applicative action on nodes in a 
+-- 'WeederAST' starting from the top node.
+--
+-- If the action fails, try it with the node's children. If it succeeds, do
+-- not proceed to the node's children.
+topLevelAnalysis
+  :: (WeederAST a, Alternative m)
+  => (NodeTrait -> Tree (WeederNode a) -> m b)
+  -> Tree (WeederNode a)
+  -> m [b]
+topLevelAnalysis f n@Node{rootLabel, subForest} =
+  analyseThis <|> fmap concat analyseChildren
+  where
+    traits = Set.toList $ nodeTraits rootLabel
+    analyseThis = fmap pure . asum $ map (`f` n) traits
+    analyseChildren = traverse (\n' -> topLevelAnalysis f n' <|> pure []) subForest
