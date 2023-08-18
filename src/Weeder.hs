@@ -38,7 +38,6 @@ import Data.Traversable ( for )
 import Data.Maybe ( mapMaybe )
 import Data.Foldable ( for_, traverse_, toList )
 import Data.Function ( (&) )
-import Data.List ( intercalate )
 import Data.Monoid ( First( First ), getFirst )
 import GHC.Generics ( Generic )
 import Prelude hiding ( span )
@@ -89,7 +88,7 @@ import GHC.Iface.Ext.Utils
   , hieTypeToIface
   , recoverFullType
   )
-import GHC.Unit.Module ( Module, moduleStableString )
+import GHC.Unit.Module ( Module )
 import GHC.Utils.Outputable ( defaultSDocContext, showSDocOneLine )
 import GHC.Iface.Type
   ( ShowForAllFlag (ShowForAllWhen)
@@ -97,15 +96,7 @@ import GHC.Iface.Type
   , IfaceTyCon (IfaceTyCon, ifaceTyConName)
   )
 import GHC.Types.Name
-  ( Name, nameModule_maybe, nameOccName
-  , OccName
-  , isDataOcc
-  , isDataSymOcc
-  , isTcOcc
-  , isTvOcc
-  , isVarOcc
-  , occNameString
-  )
+  ( Name, nameModule_maybe, nameOccName )
 import GHC.Types.SrcLoc ( RealSrcSpan, realSrcSpanEnd, realSrcSpanStart, srcLocLine )
 
 -- lens
@@ -123,38 +114,8 @@ import Control.Monad.Trans.Maybe ( runMaybeT )
 import Control.Monad.Trans.Reader ( runReaderT )
 
 -- weeder
+import Weeder.Types
 import Weeder.Config ( Config, ConfigType( Config, typeClassRoots, unusedTypes ) )
-
-
-data Declaration =
-  Declaration
-    { declModule :: Module
-      -- ^ The module this declaration occurs in.
-    , declOccName :: OccName
-      -- ^ The symbol name of a declaration.
-    }
-  deriving
-    ( Eq, Ord, Generic, NFData )
-
-
-instance Show Declaration where
-  show =
-    declarationStableName
-
-
-declarationStableName :: Declaration -> String
-declarationStableName Declaration { declModule, declOccName } =
-  let
-    namespace
-      | isVarOcc declOccName     = "var"
-      | isTvOcc declOccName      = "tv"
-      | isTcOcc declOccName      = "tc"
-      | isDataOcc declOccName    = "data"
-      | isDataSymOcc declOccName = "dataSym"
-      | otherwise                = "unknown"
-
-    in
-    intercalate "$" [ namespace, moduleStableString declModule, "$", occNameString declOccName ]
 
 
 -- | All information maintained by 'analyseHieFile'.
