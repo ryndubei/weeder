@@ -18,8 +18,12 @@ module Weeder.Types
   )
    where
 
+-- algebraic-graphs
+import Algebra.Graph ( Graph, stars )
+
 -- base
 import Control.Applicative ( Alternative (..), asum )
+import Control.Monad ( mzero, guard )
 import Data.List ( intercalate )
 import Data.Function
 import GHC.Generics ( Generic )
@@ -171,6 +175,20 @@ class WeederAST a where
   -- | A 'WeederType' may be collapsed into a list of 'Declaration's,
   -- representing the individual type constructors used.
   typesUsed :: WeederType a -> Set Declaration
+
+  -- | Generate an initial graph of the current AST.
+  -- By default, connects every declaration in the AST
+  -- to its used types.
+  initialGraph :: WeederLocalInfo a -> Tree (WeederNode a) -> Graph Declaration
+  initialGraph info ast =
+    let idents = concatMap toIdents $ Tree.flatten ast
+    in stars do 
+      i <- idents
+      t <- maybe mzero pure (lookupType info i)
+      d <- maybe mzero pure (toDeclaration i)
+      let ds = typesUsed t
+      guard $ not (Set.null ds)
+      pure (d, Set.toList ds)
 
 
 -- | Shortcut for 'WeederAST' and some useful constraints on its data families
