@@ -166,7 +166,7 @@ class WeederAST a where
   type WeederLocalInfo a
   -- | A 'WeederIdentifier' may have a 'WeederType'
   data WeederType a
-  toIdentType :: WeederLocalInfo a -> WeederIdentifier a -> Maybe (WeederType a)
+  lookupType :: WeederLocalInfo a -> WeederIdentifier a -> Maybe (WeederType a)
 
   -- | A 'WeederType' may be collapsed into a list of 'Declaration's,
   -- representing the individual type constructors used.
@@ -246,7 +246,7 @@ instance WeederAST (HieAST TypeIndex) where
     WeederType HieTypeFix
     deriving Eq
 
-  toIdentType hf (WeederIdentifier (_, details )) =
+  lookupType hf (WeederIdentifier (_, details )) =
     let ts = hie_types hf
         i = identType details
      in coerce $ fmap (`recoverFullType` ts) i
