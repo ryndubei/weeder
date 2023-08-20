@@ -46,6 +46,7 @@ library
     Weeder.Run
     Weeder.Main
     Weeder.Types
+    Weeder.Types.Flags
   autogen-modules:
     Paths_weeder
   other-modules:

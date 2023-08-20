@@ -125,6 +125,7 @@ data IdentifierTrait
   = IsUse
   | IsEvidenceUse
   | IsDeclaration
+  | IsTypeDeclaration
   | IsEvidenceBind Declaration
   deriving ( Eq, Ord, Show )
 
@@ -300,6 +301,7 @@ toNodeTrait a = case unNodeAnnotation a of
 toIdentTrait :: ContextInfo -> Maybe IdentifierTrait
 toIdentTrait x
   | isUse x = Just IsUse
+  | isTypeDeclaration x = Just IsTypeDeclaration
   | isDeclaration x = Just IsDeclaration
   | isEvidenceUse x = Just IsEvidenceUse
   | Just c <- getEvidenceBindClass x = Just (IsEvidenceBind c)
@@ -310,6 +312,15 @@ getEvidenceBindClass :: ContextInfo -> Maybe Declaration
 getEvidenceBindClass (EvidenceVarBind a@EvInstBind{} ModuleScope _) =
   nameToDeclaration (cls a)
 getEvidenceBindClass _ = Nothing
+
+
+isTypeDeclaration :: ContextInfo -> Bool
+isTypeDeclaration = \case
+  TyDecl -> True
+  Decl DataDec _ -> True
+  Decl FamDec _ -> True
+  Decl SynDec _ -> True
+  _ -> False
 
 
 isUse :: ContextInfo -> Bool
@@ -329,7 +340,6 @@ isDeclaration = \case
   ValBind RegularBind ModuleScope _ -> True
   PatternBind ModuleScope _ _       -> True
   Decl _ _                          -> True
-  TyDecl                            -> True
   ClassTyDecl{}                     -> True
 
   -- Anything else is not a declaration
