@@ -7,6 +7,10 @@
 {-# language FlexibleInstances #-}
 {-# language LambdaCase #-}
 {-# language BlockArguments #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE AllowAmbiguousTypes #-}
+{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 module Weeder.Types
   ( Declaration(..)
@@ -54,11 +58,17 @@ import GHC.Iface.Ext.Types
 
 -- parallel
 import Control.Parallel.Strategies ( NFData )
+
+-- weeder
+import Weeder.Types.Flags
+
 import Data.Maybe
 import GHC.Iface.Ext.Utils
 import qualified Data.Map.Strict as Map
 import GHC.Iface.Type
 import Data.Coerce
+
+
 
 
 data Declaration =
@@ -177,19 +187,20 @@ class WeederAST a where
   -- representing the individual type constructors used.
   typesUsed :: WeederType a -> Set Declaration
 
-  -- | Generate an initial graph of the current AST.
-  -- By default, connects every declaration in the AST
-  -- to its used types.
-  initialGraph :: WeederLocalInfo a -> Tree (WeederNode a) -> Graph Declaration
-  initialGraph info ast =
-    let idents = concatMap toIdents $ Tree.flatten ast
-    in stars do 
+
+-- | Generate an initial graph of the current AST.
+initialGraph :: forall flags a. (HasFlags flags, WeederAST a) => WeederLocalInfo a -> Tree (WeederNode a) -> Graph Declaration
+initialGraph info ast =
+  let idents = concatMap toIdents $ Tree.flatten ast
+   in if UnusedTypes `elem` getFlags @flags
+    then stars do 
       i <- idents
       t <- maybe mzero pure (lookupType info i)
       d <- maybe mzero pure (toDeclaration i)
       let ds = typesUsed t
       guard $ not (Set.null ds)
       pure (d, Set.toList ds)
+    else mempty
 
 
 -- | Shortcut for 'WeederAST' and some useful constraints on its data families
@@ -214,7 +225,7 @@ topLevelAnalysis f n@Tree.Node{rootLabel, subForest} =
     analyseChildren = traverse (\n' -> topLevelAnalysis f n' <|> pure []) subForest
 
 
-instance WeederAST (HieAST TypeIndex) where
+instance (WeederAST (HieAST TypeIndex)) where
   newtype WeederNode (HieAST TypeIndex) =
     WeederNode (HieAST TypeIndex)
   toWeederAST n = Tree.Node
