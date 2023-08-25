@@ -7,10 +7,10 @@
 {-# language FlexibleInstances #-}
 {-# language LambdaCase #-}
 {-# language BlockArguments #-}
-{-# LANGUAGE DataKinds #-}
-{-# LANGUAGE AllowAmbiguousTypes #-}
-{-# LANGUAGE TypeApplications #-}
-{-# LANGUAGE ScopedTypeVariables #-}
+{-# language DataKinds #-}
+{-# language AllowAmbiguousTypes #-}
+{-# language TypeApplications #-}
+{-# language ScopedTypeVariables #-}
 
 module Weeder.Types
   ( Declaration(..)
@@ -27,16 +27,19 @@ import Algebra.Graph ( Graph, stars )
 
 -- base
 import Control.Applicative ( Alternative (..), asum )
-import Control.Monad ( mzero, guard )
-import Data.List ( intercalate )
+import Control.Monad ( mzero, guard, (>=>) )
+import Data.Coerce
 import Data.Function
+import Data.List ( intercalate )
+import Data.Maybe
 import GHC.Generics ( Generic )
 
 -- containers
-import Data.Tree ( Tree, rootLabel, subForest )
-import qualified Data.Tree as Tree
+import qualified Data.Map.Strict as Map
 import Data.Set ( Set )
 import qualified Data.Set as Set
+import Data.Tree ( Tree, rootLabel, subForest )
+import qualified Data.Tree as Tree
 
 -- ghc
 import GHC.Plugins
@@ -55,19 +58,14 @@ import GHC.Plugins
     , realSrcSpanStart, Name, nameModule_maybe, nameOccName
     )
 import GHC.Iface.Ext.Types
+import GHC.Iface.Ext.Utils
+import GHC.Iface.Type
 
 -- parallel
 import Control.Parallel.Strategies ( NFData )
 
 -- weeder
 import Weeder.Types.Flags
-
-import Data.Maybe
-import GHC.Iface.Ext.Utils
-import qualified Data.Map.Strict as Map
-import GHC.Iface.Type
-import Data.Coerce
-
 
 
 
@@ -183,24 +181,24 @@ class WeederAST a where
   data WeederType a
   lookupType :: WeederLocalInfo a -> WeederIdentifier a -> Maybe (WeederType a)
 
-  -- | A 'WeederType' may be collapsed into a list of 'Declaration's,
+  -- | A 'WeederType' may be collapsed into a set of 'Declaration's,
   -- representing the individual type constructors used.
-  typesUsed :: WeederType a -> Set Declaration
+  typeConstructorsIn :: WeederType a -> Set Declaration
 
 
--- | Generate an initial graph of the current AST.
-initialGraph :: forall flags a. (HasFlags flags, WeederAST a) => WeederLocalInfo a -> Tree (WeederNode a) -> Graph Declaration
-initialGraph info ast =
-  let idents = concatMap toIdents $ Tree.flatten ast
-   in if UnusedTypes `elem` getFlags @flags
-    then stars do 
-      i <- idents
-      t <- maybe mzero pure (lookupType info i)
-      d <- maybe mzero pure (toDeclaration i)
-      let ds = typesUsed t
-      guard $ not (Set.null ds)
-      pure (d, Set.toList ds)
-    else mempty
+  -- | Generate an initial graph of the current AST.
+  initialGraph :: WeederLocalInfo a -> Tree (WeederNode a) -> Graph Declaration
+  initialGraph = initialGraphDefault
+
+
+initialGraphDefault :: WeederAST a => WeederLocalInfo a -> Tree (WeederNode a) -> Graph Declaration
+initialGraphDefault info ast = stars do
+    i <- concatMap toIdents $ Tree.flatten ast
+    t <- maybe mzero pure (lookupType info i)
+    d <- maybe mzero pure (toDeclaration i)
+    let ds = typeConstructorsIn t
+    guard $ not (Set.null ds)
+    pure (d, Set.toList ds)
 
 
 -- | Shortcut for 'WeederAST' and some useful constraints on its data families
@@ -225,22 +223,39 @@ topLevelAnalysis f n@Tree.Node{rootLabel, subForest} =
     analyseChildren = traverse (\n' -> topLevelAnalysis f n' <|> pure []) subForest
 
 
-instance (WeederAST (HieAST TypeIndex)) where
-  newtype WeederNode (HieAST TypeIndex) =
+-- Would be nice if we could do something like
+-- HasFlags flags => WeederAST (HieAST TypeIndex)
+-- but that does not compile even with AllowAmbiguousTypes,
+-- so we have to use the WithFlags newtype
+type HieWithFlags fs = WithFlags fs (HieAST TypeIndex)
+
+
+instance Flags fs => (WeederAST (HieWithFlags fs)) where
+  newtype WeederNode (HieWithFlags fs) =
     WeederNode (HieAST TypeIndex)
-  toWeederAST n = Tree.Node
+
+  toWeederAST (WithFlags n) = Tree.Node
     { rootLabel = WeederNode n
-    , subForest = map toWeederAST (nodeChildren n)
+    , subForest = map (toWeederAST . coerce) (nodeChildren n)
     }
 
   nodeTraits (WeederNode (Node{sourcedNodeInfo})) =
     let anns = Set.toList . Set.unions . fmap nodeAnnotations $ getSourcedNodeInfo sourcedNodeInfo
-     in Set.fromList $ mapMaybe toNodeTrait anns
+     in Set.fromList $ mapMaybe (toNodeTrait >=> simplify) anns
+    where
+      simplify = ifFlagElse @fs @'AnalyseTypes
+        Just
+        \case
+          TypeSignature -> Nothing
+          TypeInstance -> Nothing
+          TypeSynonym -> Nothing
+          TypeFamily -> Nothing
+          a -> Just a
 
   nodeLocation (WeederNode (Node{nodeSpan})) =
     srcLocLine $ realSrcSpanStart nodeSpan
 
-  newtype WeederIdentifier (HieAST TypeIndex) =
+  newtype WeederIdentifier (HieWithFlags fs) =
     WeederIdentifier (Identifier, IdentifierDetails TypeIndex)
 
   toIdents (WeederNode (Node{sourcedNodeInfo})) =
@@ -253,11 +268,25 @@ instance (WeederAST (HieAST TypeIndex)) where
       Left _ -> Nothing
 
   identTraits (WeederIdentifier (_, details)) =
-    Set.fromList . mapMaybe toIdentTrait . Set.toList $ identInfo details
+    Set.fromList . mapMaybe (toIdentTrait >=> simplifyUnusedTypes >=> simplifyTypeClassRoots) . Set.toList $ identInfo details
+    where
+      simplifyUnusedTypes = ifFlagElse @fs @'AnalyseTypes
+        Just
+        \case
+          IsTypeDeclaration -> Just IsDeclaration
+          a -> Just a
 
-  type WeederSumInfo (HieAST TypeIndex) = RefMap TypeIndex
+      simplifyTypeClassRoots = ifFlagElse @fs @'AnalyseInstances
+        Just
+        \case
+          IsEvidenceUse -> Nothing
+          a -> Just a
 
-  collectSumInfo = generateReferencesMap
+  type WeederSumInfo (HieWithFlags fs) = RefMap TypeIndex
+
+  collectSumInfo = ifFlagElse @fs @'AnalyseInstances
+    (const mempty)
+    (generateReferencesMap . (coerce :: [WithFlags fs a] -> [a]))
 
   followWithSumInfo rf (WeederIdentifier (Right name, _)) =
     let evidenceInfos = maybe mempty Tree.flatten (getEvidenceTree rf name)
@@ -268,24 +297,30 @@ instance (WeederAST (HieAST TypeIndex)) where
      in Set.fromList evBindSiteDecls
   followWithSumInfo _ _ = mempty
 
-  followable i = IsEvidenceUse `Set.member` identTraits i
+  followable i = ifFlagElse @fs @'AnalyseInstances
+    (IsEvidenceUse `Set.member` identTraits i)
+    False
 
-  type WeederLocalInfo (HieAST TypeIndex) = HieFile
+  type WeederLocalInfo (HieWithFlags fs) = HieFile
 
-  newtype WeederType (HieAST TypeIndex) =
+  newtype WeederType (HieWithFlags fs) =
     WeederType HieTypeFix
     deriving Eq
 
   lookupType hf (WeederIdentifier (_, details )) =
     let ts = hie_types hf
         i = identType details
-     in coerce $ fmap (`recoverFullType` ts) i
+     in ifFlagElse @fs @'AnalyseTypes (coerce $ fmap (`recoverFullType` ts) i) Nothing
 
-  typesUsed = 
+  typeConstructorsIn = 
     Set.fromList . mapMaybe nameToDeclaration . Set.toList . typeToNames . coerce
 
+  initialGraph = ifFlagElse @fs @'AnalyseTypes
+    initialGraphDefault
+    \_ _ -> mempty
+  
 
-instance Outputable (WeederType (HieAST TypeIndex)) where
+instance Outputable (WeederType (HieWithFlags fs)) where
   ppr = pprIfaceSigmaType ShowForAllWhen . hieTypeToIface . coerce
 
 

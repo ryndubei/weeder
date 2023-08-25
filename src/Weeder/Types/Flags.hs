@@ -1,51 +1,45 @@
 {-# language DataKinds #-}
 {-# language TypeFamilies #-}
-{-# language FlexibleInstances #-}
 {-# language FlexibleContexts #-}
-{-# language DerivingStrategies #-}
 {-# language AllowAmbiguousTypes #-}
 {-# language TypeApplications #-}
 {-# language ScopedTypeVariables #-}
 {-# language PolyKinds #-}
-{-# LANGUAGE TypeOperators #-}
+{-# language TypeOperators #-}
+{-# language ConstraintKinds #-}
+{-# language RankNTypes #-}
 
-module Weeder.Types.Flags (WeederFlag(..), HasFlags(..)) where
+module Weeder.Types.Flags (WeederFlag(..), Flags, HasFlag, HasNoFlag, ifFlagElse, WithFlags(..)) where
 
-import Unsafe.Coerce ( unsafeCoerce )
-import Type.Reflection
+import Type.Reflection ( Typeable, (:~:)(Refl) )
+import Data.Data ( eqT )
 
 
 data WeederFlag
-  = TypeClassRoots
-  | UnusedTypes
-  deriving Eq
+  = AnalyseInstances
+  | AnalyseTypes
 
 
-class Typeable k => Demote k where
-  demote :: TypeRep (a :: k) -> k
+-- | Constraint with information about which flags are set.
+type Flags flags = 
+  ( Typeable (Elem 'AnalyseInstances flags)
+  , Typeable (Elem 'AnalyseTypes flags)
+  )
 
 
-instance Demote WeederFlag where
-  demote t
-    | Just HRefl <- t `eqTypeRep` (typeRep @'TypeClassRoots) = TypeClassRoots
-    | Just HRefl <- t `eqTypeRep` (typeRep @'UnusedTypes) = UnusedTypes
-    | otherwise = error "Demote WeederFlag: unexpected flag"
+type HasFlag flags flag = (Flags flags, Elem flag flags ~ 'True)
+type HasNoFlag flags flag = (Flags flags, Elem flag flags ~ 'False)
 
 
-instance Demote k => Demote [k] where
-  demote t = case t `eqTypeRep` (typeRep @('[] :: [k])) of
-    Just HRefl -> []
-    Nothing -> case t of
-      App (App _cons k) ks -> demote (unsafeCoerce k) : demote (unsafeCoerce ks)
-      _ -> error "Demote [k]: impossible"
+newtype WithFlags (flags :: [WeederFlag]) a = WithFlags a
 
 
-class Typeable flags => HasFlags (flags :: [WeederFlag]) where
-  getFlags :: [WeederFlag]
-  getFlags = demote $ typeRep @flags
+-- | If the flag is set, run the first argument, otherwise run the second.
+ifFlagElse :: forall flags flag a. (Flags flags, Typeable (Elem flag flags)) => (HasFlag flags flag => a) -> a -> a
+ifFlagElse yes no = case eqT @'True @(Elem flag flags) of
+  Just Refl -> yes
+  Nothing -> no
 
-
-instance Typeable flags => HasFlags (flags :: [WeederFlag])
 
 type family Elem (a :: k) (as :: [k]) :: Bool where
   Elem a '[] = 'False
