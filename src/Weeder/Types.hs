@@ -19,6 +19,7 @@ module Weeder.Types
   , WeederAST(..)
   , WeederAST'
   , topLevelAnalysis
+  , analysisByCases
   )
    where
 
@@ -206,21 +207,29 @@ type WeederAST' a = (WeederAST a, Eq (WeederType a), Outputable (WeederType a))
 
 
 -- | Try to execute some potentially-failing applicative action on nodes in a 
--- 'WeederAST' starting from the top node.
+-- tree starting from the top node.
 --
 -- If the action fails, try it with the node's children. If it succeeds, do
 -- not proceed to the node's children.
-topLevelAnalysis
+topLevelAnalysis :: (Alternative m) => (Tree x -> m b) -> Tree x -> m [b]
+topLevelAnalysis f n@Tree.Node{subForest} =
+  analyseThis <|> fmap concat analyseChildren
+  where
+    analyseThis = pure <$> f n
+    analyseChildren = traverse (\n' -> topLevelAnalysis f n' <|> pure []) subForest
+
+
+-- | 'topLevelAnalysis' but specialised to functions also taking a 'NodeTrait'.
+-- The first successful action on each node is used.
+analysisByCases
   :: (WeederAST a, Alternative m)
   => (NodeTrait -> Tree (WeederNode a) -> m b)
   -> Tree (WeederNode a)
   -> m [b]
-topLevelAnalysis f n@Tree.Node{rootLabel, subForest} =
-  analyseThis <|> fmap concat analyseChildren
-  where
-    traits = Set.toList $ nodeTraits rootLabel
-    analyseThis = fmap pure . asum $ map (`f` n) traits
-    analyseChildren = traverse (\n' -> topLevelAnalysis f n' <|> pure []) subForest
+analysisByCases f n@Tree.Node{rootLabel} =
+  let traits = Set.toList $ nodeTraits rootLabel
+      f' x = asum $ map (`f` x) traits
+   in topLevelAnalysis f' n
 
 
 -- Would be nice if we could do something like
@@ -234,11 +243,13 @@ instance Flags fs => (WeederAST (HieWithFlags fs)) where
   newtype WeederNode (HieWithFlags fs) =
     WeederNode (HieAST TypeIndex)
 
+  {-# INLINABLE toWeederAST #-}
   toWeederAST (WithFlags n) = Tree.Node
     { rootLabel = WeederNode n
     , subForest = map (toWeederAST . coerce) (nodeChildren n)
     }
 
+  {-# INLINABLE nodeTraits #-}
   nodeTraits (WeederNode (Node{sourcedNodeInfo})) =
     let anns = Set.toList . Set.unions . fmap nodeAnnotations $ getSourcedNodeInfo sourcedNodeInfo
      in Set.fromList $ mapMaybe (toNodeTrait >=> simplify) anns
@@ -252,21 +263,25 @@ instance Flags fs => (WeederAST (HieWithFlags fs)) where
           TypeFamily -> Nothing
           a -> Just a
 
+  {-# INLINABLE nodeLocation #-}
   nodeLocation (WeederNode (Node{nodeSpan})) =
     srcLocLine $ realSrcSpanStart nodeSpan
 
   newtype WeederIdentifier (HieWithFlags fs) =
     WeederIdentifier (Identifier, IdentifierDetails TypeIndex)
 
+  {-# INLINABLE toIdents #-}
   toIdents (WeederNode (Node{sourcedNodeInfo})) =
     let idents = sourcedNodeIdents sourcedNodeInfo
      in coerce (Map.toList idents)
 
+  {-# INLINABLE toDeclaration #-}
   toDeclaration (WeederIdentifier (ident, _)) =
     case ident of
       Right name -> nameToDeclaration name
       Left _ -> Nothing
 
+  {-# INLINABLE identTraits #-}
   identTraits (WeederIdentifier (_, details)) =
     Set.fromList . mapMaybe (toIdentTrait >=> simplifyUnusedTypes >=> simplifyTypeClassRoots) . Set.toList $ identInfo details
     where
@@ -297,6 +312,7 @@ instance Flags fs => (WeederAST (HieWithFlags fs)) where
      in Set.fromList evBindSiteDecls
   followWithSumInfo _ _ = mempty
 
+  {-# INLINABLE followable #-}
   followable i = ifFlagElse @fs @'AnalyseInstances
     (IsEvidenceUse `Set.member` identTraits i)
     False
@@ -307,14 +323,17 @@ instance Flags fs => (WeederAST (HieWithFlags fs)) where
     WeederType HieTypeFix
     deriving Eq
 
+  {-# INLINABLE lookupType #-}
   lookupType hf (WeederIdentifier (_, details )) =
     let ts = hie_types hf
         i = identType details
      in ifFlagElse @fs @'AnalyseTypes (coerce $ fmap (`recoverFullType` ts) i) Nothing
 
+  {-# INLINABLE typeConstructorsIn #-}
   typeConstructorsIn = 
     Set.fromList . mapMaybe nameToDeclaration . Set.toList . typeToNames . coerce
 
+  {-# INLINABLE initialGraph #-}
   initialGraph = ifFlagElse @fs @'AnalyseTypes
     initialGraphDefault
     \_ _ -> mempty

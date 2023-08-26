@@ -35,6 +35,7 @@ newtype WithFlags (flags :: [WeederFlag]) a = WithFlags a
 
 
 -- | If the flag is set, run the first argument, otherwise run the second.
+{-# INLINE ifFlagElse #-}
 ifFlagElse :: forall flags flag a. (Flags flags, Typeable (Elem flag flags)) => (HasFlag flags flag => a) -> a -> a
 ifFlagElse yes no = case eqT @'True @(Elem flag flags) of
   Just Refl -> yes
