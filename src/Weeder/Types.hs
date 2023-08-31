@@ -19,17 +19,7 @@ module Weeder.Types
   , NodeTrait(..)
   , IdentifierTrait(..)
   , WeederAST'
-  , WeederAST
-    ( initialGraph
-    , followable
-    , followWithSumInfo
-    , collectSumInfo
-    )
-  , WeederNode
-  , WeederIdentifier
-  , WeederType
-  , WeederLocalInfo
-  , WeederSumInfo
+  , WeederAST(..)
   , topLevelAnalysis
   , pattern WeederNode
   , nodeTraits
@@ -164,9 +154,9 @@ data IdentifierTrait
 {-# INLINE nodeTraits #-}
 {-# INLINE nodeLocation #-}
 {-# INLINE nodeIdents #-}
-pattern WeederNode :: WeederAST a => Set NodeTrait -> Int -> [WeederIdentifier a] -> [Tree (WeederNode a)] -> Tree (WeederNode a)
-pattern WeederNode{nodeTraits, nodeLocation, nodeIdents, subnodes} <-
-  (\(Tree.Node n subnodes) -> (toNodeTraits n, toLocation n, toIdents n, subnodes) -> (nodeTraits, nodeLocation, nodeIdents, subnodes))
+pattern WeederNode :: WeederAST a => Set NodeTrait -> Int -> [WeederIdentifier a] -> WeederNode a
+pattern WeederNode{nodeTraits, nodeLocation, nodeIdents} <-
+  (\n -> (toNodeTraits n, toLocation n, toIdents n) -> (nodeTraits, nodeLocation, nodeIdents))
 {-# COMPLETE WeederNode #-}
 
 
@@ -234,19 +224,15 @@ class WeederAST a where
   typeConstructorsIn :: WeederType a -> Set Declaration
 
 
-  -- | Generate an initial graph of the current AST.
-  initialGraph :: WeederLocalInfo a -> Tree (WeederNode a) -> Graph Declaration
-  initialGraph = initialGraphDefault
-
-
-initialGraphDefault :: WeederAST a => WeederLocalInfo a -> Tree (WeederNode a) -> Graph Declaration
-initialGraphDefault info ast = stars do
-    i <- concatMap toIdents $ Tree.flatten ast
-    t <- maybe mzero pure (lookupIdentType info i)
-    d <- maybe mzero pure (toDeclaration i)
-    let ds = typeConstructorsIn t
-    guard $ not (Set.null ds)
-    pure (d, Set.toList ds)
+{-# INLINABLE initialGraph #-}
+initialGraph :: WeederAST a => WeederLocalInfo a -> Tree (WeederNode a) -> Graph Declaration
+initialGraph info ast = stars do
+  i <- concatMap toIdents $ Tree.flatten ast
+  t <- maybe mzero pure (lookupIdentType info i)
+  d <- maybe mzero pure (toDeclaration i)
+  let ds = typeConstructorsIn t
+  guard $ not (Set.null ds)
+  pure (d, Set.toList ds)
 
 
 -- | Shortcut for 'WeederAST' and some useful constraints on its data families
@@ -273,12 +259,12 @@ topLevelAnalysis f n@Tree.Node{subForest} =
 type HieWithFlags fs = WithFlags fs (HieAST TypeIndex)
 
 
-instance Flags fs => (WeederAST (HieWithFlags fs)) where
-  newtype WeederNode (HieWithFlags fs) =
+instance WeederAST (HieAST TypeIndex) where
+  newtype WeederNode (HieAST TypeIndex) =
     WN (HieAST TypeIndex)
 
   {-# INLINABLE toWeederAST #-}
-  toWeederAST (WithFlags n) = Tree.Node
+  toWeederAST n = Tree.Node
     { rootLabel = WN n
     , subForest = map (toWeederAST . coerce) (nodeChildren n)
     }
@@ -286,22 +272,13 @@ instance Flags fs => (WeederAST (HieWithFlags fs)) where
   {-# INLINABLE toNodeTraits #-}
   toNodeTraits (WN (Node{sourcedNodeInfo})) =
     let anns = Set.toList . Set.unions . fmap nodeAnnotations $ getSourcedNodeInfo sourcedNodeInfo
-     in Set.fromList $ mapMaybe (toNodeTrait >=> simplify) anns
-    where
-      simplify = ifFlagElse @fs @'AnalyseTypes
-        Just
-        \case
-          TypeSignature -> Nothing
-          TypeInstance -> Nothing
-          TypeSynonym -> Nothing
-          TypeFamily -> Nothing
-          a -> Just a
+     in Set.fromList $ mapMaybe toNodeTrait anns
 
   {-# INLINABLE toLocation #-}
   toLocation (WN (Node{nodeSpan})) =
     srcLocLine $ realSrcSpanStart nodeSpan
 
-  newtype WeederIdentifier (HieWithFlags fs) =
+  newtype WeederIdentifier (HieAST TypeIndex) =
     WI (Identifier, IdentifierDetails TypeIndex)
 
   {-# INLINABLE toIdents #-}
@@ -317,25 +294,11 @@ instance Flags fs => (WeederAST (HieWithFlags fs)) where
 
   {-# INLINABLE toIdentTraits #-}
   toIdentTraits (WI (_, details)) =
-    Set.fromList . mapMaybe (toIdentTrait >=> simplifyUnusedTypes >=> simplifyTypeClassRoots) . Set.toList $ identInfo details
-    where
-      simplifyUnusedTypes = ifFlagElse @fs @'AnalyseTypes
-        Just
-        \case
-          IsTypeDeclaration -> Just IsDeclaration
-          a -> Just a
+    Set.fromList . mapMaybe toIdentTrait . Set.toList $ identInfo details
 
-      simplifyTypeClassRoots = ifFlagElse @fs @'AnalyseInstances
-        Just
-        \case
-          IsEvidenceUse -> Nothing
-          a -> Just a
+  type WeederSumInfo (HieAST TypeIndex) = RefMap TypeIndex
 
-  type WeederSumInfo (HieWithFlags fs) = RefMap TypeIndex
-
-  collectSumInfo = ifFlagElse @fs @'AnalyseInstances
-    (const mempty)
-    (generateReferencesMap . (coerce :: [WithFlags fs a] -> [a]))
+  collectSumInfo = generateReferencesMap
 
   followWithSumInfo rf (WI (Right name, _)) =
     let evidenceInfos = maybe mempty Tree.flatten (getEvidenceTree rf name)
@@ -347,13 +310,12 @@ instance Flags fs => (WeederAST (HieWithFlags fs)) where
   followWithSumInfo _ _ = mempty
 
   {-# INLINABLE followable #-}
-  followable i = ifFlagElse @fs @'AnalyseInstances
-    (IsEvidenceUse `Set.member` toIdentTraits i)
-    False
+  followable i =
+    IsEvidenceUse `Set.member` toIdentTraits i
 
-  type WeederLocalInfo (HieWithFlags fs) = HieFile
+  type WeederLocalInfo (HieAST TypeIndex) = HieFile
 
-  newtype WeederType (HieWithFlags fs) =
+  newtype WeederType (HieAST TypeIndex) =
     WT HieTypeFix
     deriving Eq
 
@@ -361,19 +323,14 @@ instance Flags fs => (WeederAST (HieWithFlags fs)) where
   lookupIdentType hf (WI (_, details )) =
     let ts = hie_types hf
         i = identType details
-     in ifFlagElse @fs @'AnalyseTypes (coerce $ fmap (`recoverFullType` ts) i) Nothing
+     in coerce $ fmap (`recoverFullType` ts) i
 
   {-# INLINABLE typeConstructorsIn #-}
   typeConstructorsIn =
     Set.fromList . mapMaybe nameToDeclaration . Set.toList . typeToNames . coerce
 
-  {-# INLINABLE initialGraph #-}
-  initialGraph = ifFlagElse @fs @'AnalyseTypes
-    initialGraphDefault
-    \_ _ -> mempty
 
-
-instance Outputable (WeederType (HieWithFlags fs)) where
+instance Outputable (WeederType (HieAST TypeIndex)) where
   ppr = pprIfaceSigmaType ShowForAllWhen . hieTypeToIface . coerce
 
 
