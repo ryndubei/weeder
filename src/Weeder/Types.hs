@@ -7,31 +7,39 @@
 {-# language FlexibleInstances #-}
 {-# language LambdaCase #-}
 {-# language BlockArguments #-}
-{-# language DataKinds #-}
-{-# language AllowAmbiguousTypes #-}
-{-# language TypeApplications #-}
-{-# language ScopedTypeVariables #-}
 {-# language PatternSynonyms #-}
 {-# language ViewPatterns #-}
+{-# language TupleSections #-}
 
 module Weeder.Types
-  ( Declaration(..)
+  ( -- * Universal types
+    Declaration(..)
   , NodeTrait(..)
   , IdentifierTrait(..)
+    -- * WeederAST
   , WeederAST'
-  , WeederAST(..)
-  , topLevelAnalysis
+  , WeederAST
+      ( followWithSumInfo
+      , followable
+      )
+  , WeederNode
+  , WeederIdentifier
+  , WeederType
   , pattern WeederNode
   , nodeTraits
   , nodeLocation
   , nodeIdents
-  , subnodes
   , pattern WeederIdentifier
   , declaration
   , identTraits
   , lookupType
   , pattern WeederType
   , typeConstructors
+    -- * Utilities
+  , topLevelAnalysis
+  , initialGraph
+  , trimTree
+  , searchIdentTraits
   )
    where
 
@@ -40,7 +48,8 @@ import Algebra.Graph ( Graph, stars )
 
 -- base
 import Control.Applicative ( Alternative (..) )
-import Control.Monad ( mzero, guard, (>=>) )
+import Control.Monad ( mzero, guard )
+import Data.Bifunctor
 import Data.Coerce
 import Data.Function
 import Data.List ( intercalate )
@@ -48,11 +57,15 @@ import Data.Maybe
 import GHC.Generics ( Generic )
 
 -- containers
+import Data.Map (Map)
 import qualified Data.Map.Strict as Map
 import Data.Set ( Set )
 import qualified Data.Set as Set
 import Data.Tree ( Tree, rootLabel, subForest )
 import qualified Data.Tree as Tree
+
+-- dlist
+import qualified Data.DList as DList
 
 -- ghc
 import GHC.Plugins
@@ -76,10 +89,6 @@ import GHC.Iface.Type
 
 -- parallel
 import Control.Parallel.Strategies ( NFData )
-
--- weeder
-import Weeder.Types.Flags
-
 
 
 data Declaration =
@@ -138,7 +147,7 @@ data NodeTrait
   -- subnodes
   | Constructor
   | DerivingClause
-  deriving ( Eq, Show, Ord )
+  deriving ( Eq, Show, Ord, Generic )
 
 
 -- | Traits of 'WeederIdentifier' that Weeder is interested in.
@@ -147,7 +156,8 @@ data IdentifierTrait
   | IsEvidenceUse
   | IsDeclaration
   | IsTypeDeclaration
-  | IsEvidenceBind Declaration
+  | IsEvidenceBind
+      Declaration -- ^ Parent class
   deriving ( Eq, Ord, Show )
 
 
@@ -156,7 +166,7 @@ data IdentifierTrait
 {-# INLINE nodeIdents #-}
 pattern WeederNode :: WeederAST a => Set NodeTrait -> Int -> [WeederIdentifier a] -> WeederNode a
 pattern WeederNode{nodeTraits, nodeLocation, nodeIdents} <-
-  (\n -> (toNodeTraits n, toLocation n, toIdents n) -> (nodeTraits, nodeLocation, nodeIdents))
+  (\n -> (node_traits n, node_location n, node_idents n) -> (nodeTraits, nodeLocation, nodeIdents))
 {-# COMPLETE WeederNode #-}
 
 
@@ -165,15 +175,40 @@ pattern WeederNode{nodeTraits, nodeLocation, nodeIdents} <-
 {-# INLINE lookupType #-}
 pattern WeederIdentifier :: WeederAST a => Maybe Declaration -> Set IdentifierTrait -> (WeederLocalInfo a -> Maybe (WeederType a)) -> WeederIdentifier a
 pattern WeederIdentifier{declaration, identTraits, lookupType} <-
-  (\i -> (toDeclaration i, toIdentTraits i, flip lookupIdentType i) -> (declaration, identTraits, lookupType))
+  (\i -> (ident_declaration i, ident_traits i, flip lookup_type i) -> (declaration, identTraits, lookupType))
 {-# COMPLETE WeederIdentifier #-}
 
 
 {-# INLINE typeConstructors #-}
 pattern WeederType :: WeederAST a => Set Declaration -> WeederType a
 pattern WeederType{ typeConstructors } <-
-  (typeConstructorsIn -> typeConstructors)
+  (type_constructors -> typeConstructors)
 {-# COMPLETE WeederType #-}
+
+
+-- In effect, this interface is equivalent to the following datatype:
+--
+-- ```
+-- type WeederAST = Tree (WeederNode)
+-- 
+-- data WeederNode = WeederNode
+--   { nodeTraits :: Set NodeTrait 
+--   , nodeLocation :: Int
+--   , nodeIdents :: [WeederIdentifier]
+--   }
+--
+-- data WeederIdentifier = WeederIdentifier
+--   { declaration :: Maybe Declaration 
+--   , identTraits :: Set IdentifierTrait
+--   , lookupType :: WeederLocalInfo -> Maybe WeederType
+--   }
+--
+-- data WeederType = WeederType
+--   { typeConstructors :: Set Declaration
+--   }
+-- ```
+-- Making them opaque newtype wrappers arguably allows us to more easily directly
+-- manipulate implementation details.
 
 
 -- | Type class defining a simplified 'HieAST' for use by Weeder
@@ -185,27 +220,27 @@ class WeederAST a where
   -- | A 'WeederNode' may have traits describing how it
   -- should be handled. Normally, it will have just one
   -- trait.
-  toNodeTraits :: WeederNode a -> Set NodeTrait
+  node_traits :: WeederNode a -> Set NodeTrait
 
   -- | The line number of the node.
-  toLocation :: WeederNode a -> Int
+  node_location :: WeederNode a -> Int
 
   -- | Each 'WeederNode' may contain 'WeederIdentifier's
   data WeederIdentifier a
-  toIdents :: WeederNode a -> [WeederIdentifier a]
+  node_idents :: WeederNode a -> [WeederIdentifier a]
 
   -- | A 'WeederIdentifier' may be converted to a 'Declaration'
-  toDeclaration :: WeederIdentifier a -> Maybe Declaration
+  ident_declaration :: WeederIdentifier a -> Maybe Declaration
 
   -- | A 'WeederIdentifier' may possess 'IdentifierTrait's.
   -- We can therefore filter a 'WeederAST' for identifiers by these
   -- traits.
-  toIdentTraits :: WeederIdentifier a -> Set IdentifierTrait
+  ident_traits :: WeederIdentifier a -> Set IdentifierTrait
 
   -- | Summarised information about all 'WeederAST's. Reveals
   -- extra dependencies, such as type class instances.
   type WeederSumInfo a
-  collectSumInfo :: [a] -> WeederSumInfo a
+
   followWithSumInfo :: WeederSumInfo a -> WeederIdentifier a -> Set Declaration
 
   -- | Whether 'followWithSumInfo' should be called on this identifier.
@@ -215,22 +250,23 @@ class WeederAST a where
   followable _ = True
 
   type WeederLocalInfo a
+
   -- | A 'WeederIdentifier' may have a 'WeederType'
   data WeederType a
-  lookupIdentType :: WeederLocalInfo a -> WeederIdentifier a -> Maybe (WeederType a)
+  lookup_type :: WeederLocalInfo a -> WeederIdentifier a -> Maybe (WeederType a)
 
   -- | A 'WeederType' may be collapsed into a set of 'Declaration's,
   -- representing the individual type constructors used.
-  typeConstructorsIn :: WeederType a -> Set Declaration
+  type_constructors :: WeederType a -> Set Declaration
 
 
 {-# INLINABLE initialGraph #-}
 initialGraph :: WeederAST a => WeederLocalInfo a -> Tree (WeederNode a) -> Graph Declaration
 initialGraph info ast = stars do
-  i <- concatMap toIdents $ Tree.flatten ast
-  t <- maybe mzero pure (lookupIdentType info i)
-  d <- maybe mzero pure (toDeclaration i)
-  let ds = typeConstructorsIn t
+  i <- concatMap nodeIdents $ Tree.flatten ast
+  t <- maybe mzero pure (lookupType i info)
+  d <- maybe mzero pure (declaration i)
+  let ds = typeConstructors t
   guard $ not (Set.null ds)
   pure (d, Set.toList ds)
 
@@ -252,53 +288,71 @@ topLevelAnalysis f n@Tree.Node{subForest} =
     analyseChildren = traverse (\n' -> topLevelAnalysis f n' <|> pure []) subForest
 
 
--- Would be nice if we could do something like
--- HasFlags flags => WeederAST (HieAST TypeIndex)
--- but that does not compile even with AllowAmbiguousTypes,
--- so we have to use the WithFlags newtype
-type HieWithFlags fs = WithFlags fs (HieAST TypeIndex)
+{-# INLINE trimTree #-}
+trimTree :: (x -> Bool) -> Tree x -> Maybe (Tree x)
+trimTree p = Tree.foldTree (\x xs -> if p x then Just (Tree.Node x (catMaybes xs)) else Nothing)
+
+
+-- | Find keys and values in a tree.
+searchTree :: Ord b => (a -> [(b, c)]) -> Tree a -> Map b [c]
+searchTree f n =
+  let n' = fmap (map (second pure) . f) n
+      results = Map.fromListWith (<>) <$> n'
+      result = Tree.foldTree (\m ms -> Map.unionsWith (<>) (m:ms)) results
+   in fmap DList.toList result
+
+
+-- | Turn each subtree into a node
+volumiseTree :: Tree a -> Tree (Tree a)
+volumiseTree = Tree.unfoldTree (\t -> (t, subForest t))
+
+
+-- | Find locations of identifier traits in a WeederAST.
+searchIdentTraits :: WeederAST a => Tree (WeederNode a) -> Map IdentifierTrait [(Tree (WeederNode a), WeederIdentifier a)]
+searchIdentTraits = searchTree go . volumiseTree
+  where
+    go n@(rootLabel -> WeederNode{nodeIdents}) =
+      map (second (n,))
+      $ concatMap (\c@(WeederIdentifier{identTraits}) -> map (,c) (Set.toList identTraits)) nodeIdents
 
 
 instance WeederAST (HieAST TypeIndex) where
   newtype WeederNode (HieAST TypeIndex) =
     WN (HieAST TypeIndex)
 
-  {-# INLINABLE toWeederAST #-}
   toWeederAST n = Tree.Node
     { rootLabel = WN n
     , subForest = map (toWeederAST . coerce) (nodeChildren n)
     }
 
-  {-# INLINABLE toNodeTraits #-}
-  toNodeTraits (WN (Node{sourcedNodeInfo})) =
+  {-# INLINABLE node_traits #-}
+  node_traits (WN (Node{sourcedNodeInfo})) =
     let anns = Set.toList . Set.unions . fmap nodeAnnotations $ getSourcedNodeInfo sourcedNodeInfo
      in Set.fromList $ mapMaybe toNodeTrait anns
 
-  {-# INLINABLE toLocation #-}
-  toLocation (WN (Node{nodeSpan})) =
+  {-# INLINABLE node_location #-}
+  node_location (WN (Node{nodeSpan})) =
     srcLocLine $ realSrcSpanStart nodeSpan
 
   newtype WeederIdentifier (HieAST TypeIndex) =
     WI (Identifier, IdentifierDetails TypeIndex)
 
-  {-# INLINABLE toIdents #-}
-  toIdents (WN (Node{sourcedNodeInfo})) =
+  {-# INLINABLE node_idents #-}
+  node_idents (WN (Node{sourcedNodeInfo})) =
     let idents = sourcedNodeIdents sourcedNodeInfo
      in coerce (Map.toList idents)
 
-  {-# INLINABLE toDeclaration #-}
-  toDeclaration (WI (ident, _)) =
+  {-# INLINABLE ident_declaration #-}
+  ident_declaration (WI (ident, _)) =
     case ident of
       Right name -> nameToDeclaration name
       Left _ -> Nothing
 
-  {-# INLINABLE toIdentTraits #-}
-  toIdentTraits (WI (_, details)) =
+  {-# INLINABLE ident_traits #-}
+  ident_traits (WI (_, details)) =
     Set.fromList . mapMaybe toIdentTrait . Set.toList $ identInfo details
 
   type WeederSumInfo (HieAST TypeIndex) = RefMap TypeIndex
-
-  collectSumInfo = generateReferencesMap
 
   followWithSumInfo rf (WI (Right name, _)) =
     let evidenceInfos = maybe mempty Tree.flatten (getEvidenceTree rf name)
@@ -311,7 +365,7 @@ instance WeederAST (HieAST TypeIndex) where
 
   {-# INLINABLE followable #-}
   followable i =
-    IsEvidenceUse `Set.member` toIdentTraits i
+    IsEvidenceUse `Set.member` ident_traits i
 
   type WeederLocalInfo (HieAST TypeIndex) = HieFile
 
@@ -319,14 +373,14 @@ instance WeederAST (HieAST TypeIndex) where
     WT HieTypeFix
     deriving Eq
 
-  {-# INLINABLE lookupIdentType #-}
-  lookupIdentType hf (WI (_, details )) =
+  {-# INLINABLE lookup_type #-}
+  lookup_type hf (WI (_, details )) =
     let ts = hie_types hf
         i = identType details
      in coerce $ fmap (`recoverFullType` ts) i
 
-  {-# INLINABLE typeConstructorsIn #-}
-  typeConstructorsIn =
+  {-# INLINABLE type_constructors #-}
+  type_constructors =
     Set.fromList . mapMaybe nameToDeclaration . Set.toList . typeToNames . coerce
 
 
