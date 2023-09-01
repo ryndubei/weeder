@@ -10,32 +10,41 @@
 {-# language PatternSynonyms #-}
 {-# language ViewPatterns #-}
 {-# language TupleSections #-}
+{-# language AllowAmbiguousTypes #-}
 
 module Weeder.Types
   ( -- * Universal types
     Declaration(..)
   , NodeTrait(..)
   , IdentifierTrait(..)
+  , nameToDeclaration
     -- * WeederAST
   , WeederAST'
   , WeederAST
       ( followWithSumInfo
       , followable
+      , toWeederAST
       )
   , WeederNode
   , WeederIdentifier
   , WeederType
+  , WeederLocalInfo
+  , WeederSumInfo
   , pattern WeederNode
   , nodeTraits
   , nodeLocation
   , nodeIdents
   , pattern WeederIdentifier
-  , declaration
+  , identName
   , identTraits
   , lookupType
   , pattern WeederType
   , typeConstructors
     -- * Utilities
+  , IdentTraitMap
+  , lookupMonoid
+  , declsOfTrait
+  , identDeclaration
   , topLevelAnalysis
   , initialGraph
   , trimTree
@@ -48,7 +57,7 @@ import Algebra.Graph ( Graph, stars )
 
 -- base
 import Control.Applicative ( Alternative (..) )
-import Control.Monad ( mzero, guard )
+import Control.Monad ( mzero, guard, (>=>) )
 import Data.Bifunctor
 import Data.Coerce
 import Data.Function
@@ -81,7 +90,11 @@ import GHC.Plugins
     , Outputable(..)
     , unpackFS
     , srcLocLine
-    , realSrcSpanStart, Name, nameModule_maybe, nameOccName
+    , realSrcSpanStart
+    , Name
+    , nameModule_maybe
+    , nameOccName
+    , realSrcSpanEnd
     )
 import GHC.Iface.Ext.Types
 import GHC.Iface.Ext.Utils
@@ -155,6 +168,7 @@ data IdentifierTrait
   = IsUse
   | IsEvidenceUse
   | IsDeclaration
+  | IsClassDeclaration
   | IsTypeDeclaration
   | IsEvidenceBind
       Declaration -- ^ Parent class
@@ -164,18 +178,18 @@ data IdentifierTrait
 {-# INLINE nodeTraits #-}
 {-# INLINE nodeLocation #-}
 {-# INLINE nodeIdents #-}
-pattern WeederNode :: WeederAST a => Set NodeTrait -> Int -> [WeederIdentifier a] -> WeederNode a
+pattern WeederNode :: WeederAST a => Set NodeTrait -> Maybe Int -> [WeederIdentifier a] -> WeederNode a
 pattern WeederNode{nodeTraits, nodeLocation, nodeIdents} <-
   (\n -> (node_traits n, node_location n, node_idents n) -> (nodeTraits, nodeLocation, nodeIdents))
 {-# COMPLETE WeederNode #-}
 
 
-{-# INLINE declaration #-}
+{-# INLINE identName #-}
 {-# INLINE identTraits #-}
 {-# INLINE lookupType #-}
-pattern WeederIdentifier :: WeederAST a => Maybe Declaration -> Set IdentifierTrait -> (WeederLocalInfo a -> Maybe (WeederType a)) -> WeederIdentifier a
-pattern WeederIdentifier{declaration, identTraits, lookupType} <-
-  (\i -> (ident_declaration i, ident_traits i, flip lookup_type i) -> (declaration, identTraits, lookupType))
+pattern WeederIdentifier :: WeederAST a => Maybe Name -> Set IdentifierTrait -> (WeederLocalInfo a -> Maybe (WeederType a)) -> WeederIdentifier a
+pattern WeederIdentifier{identName, identTraits, lookupType} <-
+  (\i -> (ident_name i, ident_traits i, flip lookup_type i) -> (identName, identTraits, lookupType))
 {-# COMPLETE WeederIdentifier #-}
 
 
@@ -223,14 +237,14 @@ class WeederAST a where
   node_traits :: WeederNode a -> Set NodeTrait
 
   -- | The line number of the node.
-  node_location :: WeederNode a -> Int
+  node_location :: WeederNode a -> Maybe Int
 
   -- | Each 'WeederNode' may contain 'WeederIdentifier's
   data WeederIdentifier a
   node_idents :: WeederNode a -> [WeederIdentifier a]
 
-  -- | A 'WeederIdentifier' may be converted to a 'Declaration'
-  ident_declaration :: WeederIdentifier a -> Maybe Declaration
+  -- | A 'WeederIdentifier' may be converted to a 'Name'
+  ident_name :: WeederIdentifier a -> Maybe Name
 
   -- | A 'WeederIdentifier' may possess 'IdentifierTrait's.
   -- We can therefore filter a 'WeederAST' for identifiers by these
@@ -241,13 +255,11 @@ class WeederAST a where
   -- extra dependencies, such as type class instances.
   type WeederSumInfo a
 
-  followWithSumInfo :: WeederSumInfo a -> WeederIdentifier a -> Set Declaration
+  followWithSumInfo :: WeederSumInfo a -> Name -> [Declaration]
 
-  -- | Whether 'followWithSumInfo' should be called on this identifier.
-  -- Should be 'True' for all identifiers where 'followWithSumInfo'
-  -- can be non-empty.
-  followable :: WeederIdentifier a -> Bool
-  followable _ = True
+  -- | Whether 'followWithSumInfo' should be called on an identifier
+  -- containing this trait.
+  followable :: IdentifierTrait -> Bool
 
   type WeederLocalInfo a
 
@@ -260,12 +272,16 @@ class WeederAST a where
   type_constructors :: WeederType a -> Set Declaration
 
 
+identDeclaration :: WeederAST a => WeederIdentifier a -> Maybe Declaration
+identDeclaration = identName >=> nameToDeclaration
+
+
 {-# INLINABLE initialGraph #-}
 initialGraph :: WeederAST a => WeederLocalInfo a -> Tree (WeederNode a) -> Graph Declaration
 initialGraph info ast = stars do
   i <- concatMap nodeIdents $ Tree.flatten ast
   t <- maybe mzero pure (lookupType i info)
-  d <- maybe mzero pure (declaration i)
+  d <- maybe mzero pure (identDeclaration i)
   let ds = typeConstructors t
   guard $ not (Set.null ds)
   pure (d, Set.toList ds)
@@ -278,14 +294,29 @@ type WeederAST' a = (WeederAST a, Eq (WeederType a), Outputable (WeederType a))
 -- | Try to execute some potentially-failing applicative action on nodes in a 
 -- tree starting from the top node.
 --
--- If the action fails, try it with the node's children. If it succeeds, do
--- not proceed to the node's children.
-topLevelAnalysis :: (Alternative m) => (Tree x -> m b) -> Tree x -> m [b]
-topLevelAnalysis f n@Tree.Node{subForest} =
-  analyseThis <|> fmap concat analyseChildren
+-- If the action fails, try it on the node's subforest. If it succeeds, do
+-- not proceed to the subforest.
+--
+-- Returns the parts of the tree that failed, and a list of successful outputs.
+--
+-- Always succeeds.
+topLevelAnalysis :: (Alternative m) => Tree x -> (Tree x -> m b) -> m ([b], Maybe (Tree x))
+topLevelAnalysis n@Tree.Node{subForest} f =
+  ((,Nothing) <$> analyseThis) <|> fmap (second Just . concatSubforest) analyseSubForest
   where
+    concatSubforest = foldr (\(as, s) (bs, t) -> (as ++ bs, t{subForest = maybe subForest (:subForest) s})) ([],n)
     analyseThis = pure <$> f n
-    analyseChildren = traverse (\n' -> topLevelAnalysis f n' <|> pure []) subForest
+    analyseSubForest = traverse (\n' -> topLevelAnalysis n' f <|> pure ([], Just n')) subForest
+
+
+{-# INLINE lookupMonoid #-}
+lookupMonoid :: (Ord k, Monoid a) => k -> Map k a -> a
+lookupMonoid k = fromMaybe mempty . Map.lookup k 
+
+
+{-# INLINE declsOfTrait #-}
+declsOfTrait :: WeederAST a => IdentifierTrait -> IdentTraitMap a -> [Declaration]
+declsOfTrait x = mapMaybe (identDeclaration . snd) . lookupMonoid x
 
 
 {-# INLINE trimTree #-}
@@ -307,8 +338,11 @@ volumiseTree :: Tree a -> Tree (Tree a)
 volumiseTree = Tree.unfoldTree (\t -> (t, subForest t))
 
 
+type IdentTraitMap a = Map IdentifierTrait [(Tree (WeederNode a), WeederIdentifier a)]
+
+
 -- | Find locations of identifier traits in a WeederAST.
-searchIdentTraits :: WeederAST a => Tree (WeederNode a) -> Map IdentifierTrait [(Tree (WeederNode a), WeederIdentifier a)]
+searchIdentTraits :: WeederAST a => Tree (WeederNode a) -> IdentTraitMap a
 searchIdentTraits = searchTree go . volumiseTree
   where
     go n@(rootLabel -> WeederNode{nodeIdents}) =
@@ -331,8 +365,9 @@ instance WeederAST (HieAST TypeIndex) where
      in Set.fromList $ mapMaybe toNodeTrait anns
 
   {-# INLINABLE node_location #-}
-  node_location (WN (Node{nodeSpan})) =
-    srcLocLine $ realSrcSpanStart nodeSpan
+  node_location (WN (Node{nodeSpan})) = do
+    guard (realSrcSpanStart nodeSpan /= realSrcSpanEnd nodeSpan)
+    pure $ srcLocLine (realSrcSpanStart nodeSpan)
 
   newtype WeederIdentifier (HieAST TypeIndex) =
     WI (Identifier, IdentifierDetails TypeIndex)
@@ -342,10 +377,10 @@ instance WeederAST (HieAST TypeIndex) where
     let idents = sourcedNodeIdents sourcedNodeInfo
      in coerce (Map.toList idents)
 
-  {-# INLINABLE ident_declaration #-}
-  ident_declaration (WI (ident, _)) =
+  {-# INLINABLE ident_name #-}
+  ident_name (WI (ident, _)) =
     case ident of
-      Right name -> nameToDeclaration name
+      Right name -> Just name
       Left _ -> Nothing
 
   {-# INLINABLE ident_traits #-}
@@ -354,18 +389,17 @@ instance WeederAST (HieAST TypeIndex) where
 
   type WeederSumInfo (HieAST TypeIndex) = RefMap TypeIndex
 
-  followWithSumInfo rf (WI (Right name, _)) =
+  {-# INLINABLE followWithSumInfo #-}
+  followWithSumInfo rf name =
     let evidenceInfos = maybe mempty Tree.flatten (getEvidenceTree rf name)
         instEvidenceInfos = evidenceInfos & filter \case
           EvidenceInfo _ _ _ (Just (EvInstBind _ _, ModuleScope, _)) -> True
           _ -> False
-        evBindSiteDecls = mapMaybe (nameToDeclaration . evidenceVar) instEvidenceInfos
-     in Set.fromList evBindSiteDecls
-  followWithSumInfo _ _ = mempty
+     in mapMaybe (nameToDeclaration . evidenceVar) instEvidenceInfos
 
   {-# INLINABLE followable #-}
-  followable i =
-    IsEvidenceUse `Set.member` ident_traits i
+  followable IsEvidenceUse = True
+  followable _ = False 
 
   type WeederLocalInfo (HieAST TypeIndex) = HieFile
 
@@ -412,6 +446,7 @@ toIdentTrait :: ContextInfo -> Maybe IdentifierTrait
 toIdentTrait x
   | isUse x = Just IsUse
   | isTypeDeclaration x = Just IsTypeDeclaration
+  | isClassDeclaration x = Just IsClassDeclaration
   | isDeclaration x = Just IsDeclaration
   | isEvidenceUse x = Just IsEvidenceUse
   | Just c <- getEvidenceBindClass x = Just (IsEvidenceBind c)
@@ -422,6 +457,12 @@ getEvidenceBindClass :: ContextInfo -> Maybe Declaration
 getEvidenceBindClass (EvidenceVarBind a@EvInstBind{} ModuleScope _) =
   nameToDeclaration (cls a)
 getEvidenceBindClass _ = Nothing
+
+
+isClassDeclaration :: ContextInfo -> Bool
+isClassDeclaration = \case
+  Decl ClassDec _ -> True
+  _ -> False
 
 
 isTypeDeclaration :: ContextInfo -> Bool
