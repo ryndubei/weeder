@@ -9,6 +9,8 @@
 {-# language OverloadedLabels #-}
 {-# language OverloadedStrings #-}
 {-# language TupleSections #-}
+{-# language ViewPatterns #-}
+{-# language OverloadedStrings #-}
 
 module Weeder
   ( -- * Analysis
@@ -32,14 +34,13 @@ import Algebra.Graph ( Graph, edge, empty, overlay, vertex, stars, star, overlay
 import Algebra.Graph.ToGraph ( dfs )
 
 -- base
-import Control.Applicative ( Alternative )
-import Control.Monad ( guard, msum, when, unless, mzero )
+import Control.Applicative ( Alternative, asum )
+import Control.Monad ( guard, msum, when, unless, mzero, void, (>=>) )
 import Data.Traversable ( for )
-import Data.Maybe ( mapMaybe )
+import Data.Maybe ( mapMaybe, fromMaybe, listToMaybe )
 import Data.Foldable ( for_, traverse_, toList )
 import Data.Function ( (&) )
 import Data.List ( intercalate )
-import Data.Monoid ( First( First ), getFirst )
 import GHC.Generics ( Generic )
 import Prelude hiding ( span )
 
@@ -49,14 +50,14 @@ import qualified Data.Map.Strict as Map
 import Data.Sequence ( Seq )
 import Data.Set ( Set )
 import qualified Data.Set as Set
-import Data.Tree (Tree)
+import Data.Tree ( Tree, rootLabel )
 import qualified Data.Tree as Tree
 
 -- generic-lens
 import Data.Generics.Labels ()
 
 -- ghc
-import GHC.Data.FastString ( unpackFS )
+import GHC.Data.FastString ( FastString )
 import GHC.Types.Avail
   ( AvailInfo( Avail, AvailTC )
   , GreName( NormalGreName, FieldGreName )
@@ -64,10 +65,10 @@ import GHC.Types.Avail
 import GHC.Types.FieldLabel ( FieldLabel( FieldLabel, flSelector ) )
 import GHC.Iface.Ext.Types
   ( BindType( RegularBind )
-  , ContextInfo( Decl, ValBind, PatternBind, Use, TyDecl, ClassTyDecl, EvidenceVarBind, RecField )
+  , ContextInfo(.. )
   , DeclType( DataDec, ClassDec, ConDec, SynDec, FamDec )
   , EvVarSource ( EvInstBind, cls )
-  , HieAST( Node, nodeChildren, nodeSpan, sourcedNodeInfo )
+  , HieAST( Node, nodeChildren, sourcedNodeInfo )
   , HieASTs( HieASTs )
   , HieFile( HieFile, hie_asts, hie_exports, hie_module, hie_hs_file, hie_types )
   , HieType( HTyVarTy, HAppTy, HTyConApp, HForAllTy, HFunTy, HQualTy, HLitTy, HCastTy, HCoercionTy )
@@ -75,7 +76,7 @@ import GHC.Iface.Ext.Types
   , HieTypeFix( Roll )
   , IdentifierDetails( IdentifierDetails, identInfo, identType )
   , NodeAnnotation( NodeAnnotation, nodeAnnotType )
-  , NodeInfo( nodeIdentifiers, nodeAnnotations )
+  , NodeInfo( nodeIdentifiers )
   , Scope( ModuleScope )
   , RecFieldContext ( RecFieldOcc )
   , TypeIndex
@@ -84,17 +85,13 @@ import GHC.Iface.Ext.Types
 import GHC.Iface.Ext.Utils
   ( EvidenceInfo( EvidenceInfo, evidenceVar )
   , RefMap
-  , findEvidenceUse
   , getEvidenceTree
-  , hieTypeToIface
   , recoverFullType
   )
 import GHC.Unit.Module ( Module, moduleStableString )
-import GHC.Utils.Outputable ( defaultSDocContext, showSDocOneLine )
+import GHC.Utils.Outputable ( defaultSDocContext, showSDocOneLine, ppr )
 import GHC.Iface.Type
-  ( ShowForAllFlag (ShowForAllWhen)
-  , pprIfaceSigmaType
-  , IfaceTyCon (IfaceTyCon, ifaceTyConName)
+  ( IfaceTyCon (IfaceTyCon, ifaceTyConName)
   )
 import GHC.Types.Name
   ( Name, nameModule_maybe, nameOccName
@@ -106,7 +103,6 @@ import GHC.Types.Name
   , isVarOcc
   , occNameString
   )
-import GHC.Types.SrcLoc ( RealSrcSpan, realSrcSpanEnd, realSrcSpanStart, srcLocLine )
 
 -- lens
 import Control.Lens ( (%=) )
@@ -119,11 +115,13 @@ import Control.Monad.Reader.Class ( MonadReader, asks )
 import Control.Parallel.Strategies ( NFData )
 
 -- transformers
-import Control.Monad.Trans.Maybe ( runMaybeT )
+import Control.Monad.Trans.Maybe ( runMaybeT, MaybeT )
 import Control.Monad.Trans.Reader ( runReaderT )
 
 -- weeder
 import Weeder.Config ( Config, ConfigType( Config, typeClassRoots, unusedTypes ) )
+import Weeder.Types
+import Data.Either
 
 
 data Declaration =
@@ -281,23 +279,13 @@ analyseHieFile' = do
   g <- asks initialGraph
   #dependencyGraph %= overlay g
 
-  for_ hieASTs topLevelAnalysis
+  for_ hieASTs analyseAST
 
   for_ hie_exports ( analyseExport hie_module )
 
 
 lookupType :: HieFile -> TypeIndex -> HieTypeFix
 lookupType hf t = recoverFullType t $ hie_types hf
-
-
-lookupPprType :: MonadReader AnalysisInfo m => TypeIndex -> m String
-lookupPprType t = do
-  hf <- asks currentHieFile
-  pure . renderType $ lookupType hf t
-
-  where
-
-    renderType = showSDocOneLine defaultSDocContext . pprIfaceSigmaType ShowForAllWhen . hieTypeToIface
 
 
 -- | Names mentioned within the type.
@@ -366,116 +354,143 @@ addImplicitRoot x =
   #implicitRoots %= Set.insert (DeclarationRoot x)
 
 
-addInstanceRoot :: ( MonadState Analysis m, MonadReader AnalysisInfo m ) => Declaration -> TypeIndex -> Name -> m ()
-addInstanceRoot x t cls = do
-  for_ (nameToDeclaration cls) \cls' ->
-    #implicitRoots %= Set.insert (InstanceRoot x cls')
+addInstanceRoot' :: (MonadState Analysis m, MonadReader AnalysisInfo m) => Declaration -> WeederType -> Declaration -> m ()
+addInstanceRoot' x t cls = do
+  #implicitRoots %= Set.insert (InstanceRoot x cls)
 
   -- since instances will not appear in the output if typeClassRoots is True
   Config{ typeClassRoots } <- asks weederConfig
   unless typeClassRoots $ do
-    str <- lookupPprType t
+    let str = showSDocOneLine defaultSDocContext $ ppr t
     #prettyPrintedType %= Map.insert x str
 
 
-define :: MonadState Analysis m => Declaration -> RealSrcSpan -> m ()
-define decl span =
-  when ( realSrcSpanStart span /= realSrcSpanEnd span ) do
-    #declarationSites %= Map.insertWith Set.union decl ( Set.singleton . srcLocLine $ realSrcSpanStart span )
-    #dependencyGraph %= overlay ( vertex decl )
+define :: MonadState Analysis m => Declaration -> WeederNode -> m ()
+define decl WeederNode{ nodeLocation = Just l } = do
+  #declarationSites %= Map.insertWith Set.union decl ( Set.singleton l )
+  #dependencyGraph %= overlay ( vertex decl )
+define _ _ = pure ()
 
 
-topLevelAnalysis :: ( MonadState Analysis m, MonadReader AnalysisInfo m ) => HieAST TypeIndex -> m ()
-topLevelAnalysis n@Node{ nodeChildren } = do
+analyseAST :: ( MonadState Analysis m, MonadReader AnalysisInfo m ) => HieAST TypeIndex -> m ()
+analyseAST n = do
   Config{ unusedTypes } <- asks weederConfig
-  analysed <-
-    runMaybeT
-      ( msum $
-          [
-            analyseStandaloneDeriving n
-          , analyseInstanceDeclaration n
-          , analyseBinding n
-          , analyseRewriteRule n
-          , analyseClassDeclaration n
-          , analyseDataDeclaration n
-          , analysePatternSynonyms n
-          ] ++ if unusedTypes then
-          [ analyseTypeSynonym n
-          , analyseFamilyDeclaration n
-          , analyseFamilyInstance n
-          , analyseTypeSignature n
-          ] else []
-      )
-
-  case analysed of
-    Nothing ->
-      -- We didn't find a top level declaration here, check all this nodes
-      -- children.
-      traverse_ topLevelAnalysis nodeChildren
-
-    Just () ->
-      -- Top level analysis succeeded, there's nothing more to do for this node.
-      return ()
+  hf <- asks currentHieFile
+  let n' = searchContextInfo (toWeederAST hf n)
+  topLevelAnalysis' n' \a -> msum . map ($ a) $
+    [ analyseStandaloneDeriving
+    , analyseInstanceDeclaration
+    , analyseBinding
+    , analyseRewriteRule
+    , analyseClassDeclaration
+    , analyseDataDeclaration
+    , analysePatternSynonyms
+    ] ++ if unusedTypes then
+    [ analyseTypeSynonym
+    , analyseFamilyDeclaration
+    , analyseFamilyInstance
+    , analyseTypeSignature
+    ] else []
 
 
-annsContain :: HieAST a -> (String, String) -> Bool
-annsContain Node{ sourcedNodeInfo } ann =
-  any (Set.member ann . Set.map unNodeAnnotation . nodeAnnotations) $ getSourcedNodeInfo sourcedNodeInfo
+topLevelAnalysis' :: Monad m => Tree x -> (Tree x -> MaybeT m ()) -> m ()
+topLevelAnalysis' n = void . runMaybeT . topLevelAnalysis n
 
 
-analyseBinding :: ( Alternative m, MonadState Analysis m, MonadReader AnalysisInfo m ) => HieAST a -> m ()
-analyseBinding n@Node{ nodeSpan } = do
-  let bindAnns = Set.fromList [("FunBind", "HsBindLR"), ("PatBind", "HsBindLR")]
+annsContain :: WeederNode -> (FastString, FastString) -> Bool
+annsContain WeederNode{ nodeAnns } ann =
+  uncurry NodeAnnotation ann `elem` nodeAnns
+
+
+lookupMonoid :: (Ord k, Monoid a) => k -> Map k a -> a
+lookupMonoid k = fromMaybe mempty . Map.lookup k 
+
+
+identDeclaration :: WeederIdentifier -> Maybe Declaration
+identDeclaration = identName >=> nameToDeclaration
+
+
+declsOfContext :: (ContextInfo -> Bool) -> ContextInfoMap -> [Declaration]
+declsOfContext f m = Map.elems m' >>= mapMaybe (identDeclaration . snd)
+  where
+      m' = Map.filterWithKey (\k _ -> f k) m
+
+
+analyseBinding :: (Alternative m, MonadState Analysis m, MonadReader AnalysisInfo m) => Tree (WeederNode, ContextInfoMap) -> m ()
+analyseBinding (rootLabel -> (n, contextMap) ) = do
+  let bindAnns = [("FunBind", "HsBindLR"), ("PatBind", "HsBindLR")]
+      ds = declsOfContext isDeclaration contextMap
+      uses' = declsOfContext isUse contextMap
+
   guard $ any (annsContain n) bindAnns
 
-  for_ ( findDeclarations n ) \d -> do
-    define d nodeSpan
+  for_ ds \d -> do
+    define d n
 
-    requestEvidence n d
+    requestEvidence' contextMap d
 
-    for_ ( uses n ) $ addDependency d
+    for_ uses' $ addDependency d
 
 
-analyseRewriteRule :: ( Alternative m, MonadState Analysis m ) => HieAST a -> m ()
-analyseRewriteRule n = do
+analyseRewriteRule :: ( Alternative m, MonadState Analysis m ) => Tree (WeederNode, ContextInfoMap) -> m ()
+analyseRewriteRule (rootLabel -> (n, contextMap)) = do
   guard $ annsContain n ("HsRule", "RuleDecl")
+  
+  let uses' = declsOfContext isUse contextMap
 
-  for_ ( uses n ) addImplicitRoot
+  for_ uses' addImplicitRoot
 
 
-analyseInstanceDeclaration :: ( Alternative m, MonadState Analysis m, MonadReader AnalysisInfo m ) => HieAST TypeIndex -> m ()
-analyseInstanceDeclaration n@Node{ nodeSpan } = do
+extractEvInstBinds :: ContextInfoMap -> [(Declaration, Declaration, WeederIdentifier, Tree WeederNode)]
+extractEvInstBinds contextMap = do
+  (k, v) <- Map.toList contextMap
+  c <- maybe mzero pure (getEvidenceBindClass k)
+  (ast, i) <- v
+  d <- maybe mzero pure (identDeclaration i)
+  pure (d, c, i, ast)
+
+
+
+analyseInstanceDeclaration :: ( Alternative m, MonadState Analysis m, MonadReader AnalysisInfo m ) => Tree (WeederNode, ContextInfoMap) -> m ()
+analyseInstanceDeclaration (rootLabel -> (n, contextMap)) = do
   guard $ annsContain n ("ClsInstD", "InstDecl")
 
-  for_ ( findEvInstBinds n ) \(d, cs, ids, _) -> do
+  let evInstBinds = extractEvInstBinds contextMap
+      uses' = declsOfContext isUse contextMap
+
+  for_ evInstBinds \(d, c, i, _) -> do
     -- This makes instance declarations show up in 
     -- the output if type-class-roots is set to False.
-    define d nodeSpan
+    define d n
 
-    requestEvidence n d
+    requestEvidence' contextMap d
 
-    for_ ( uses n ) $ addDependency d
+    for_ uses' $ addDependency d
 
-    case identType ids of
-      Just t -> for_ cs (addInstanceRoot d t)
+    case identWeederType i of
+      Just t -> addInstanceRoot' d t c
       Nothing -> pure ()
 
 
-analyseClassDeclaration :: ( Alternative m, MonadState Analysis m, MonadReader AnalysisInfo m ) => HieAST a -> m ()
-analyseClassDeclaration n@Node{ nodeSpan } = do
+analyseClassDeclaration :: ( Alternative m, MonadState Analysis m, MonadReader AnalysisInfo m ) => Tree (WeederNode, ContextInfoMap) -> m ()
+analyseClassDeclaration (rootLabel -> (n, contextMap)) = do
   guard $ annsContain n ("ClassDecl", "TyClDecl")
 
-  for_ ( findIdentifiers isClassDeclaration n ) $ \d -> do
-    define d nodeSpan
+  let ds = declsOfContext isClassDeclaration contextMap
+      allDecls = Map.elems contextMap >>= mapMaybe (identDeclaration . snd)
 
-    requestEvidence n d
+  for_ ds $ \d -> do
+    define d n
 
-    (for_ ( findIdentifiers ( const True ) n ) . addDependency) d
+    requestEvidence' contextMap d
+
+    for_ allDecls $ addDependency d
+ 
 
   where
 
     isClassDeclaration =
-      not . Set.null . Set.filter \case
+      \case
         Decl ClassDec _ ->
           True
 
@@ -483,43 +498,53 @@ analyseClassDeclaration n@Node{ nodeSpan } = do
           False
 
 
-analyseDataDeclaration :: ( Alternative m, MonadState Analysis m, MonadReader AnalysisInfo m ) => HieAST TypeIndex -> m ()
-analyseDataDeclaration n = do
+analyseDataDeclaration :: ( Alternative m, MonadState Analysis m, MonadReader AnalysisInfo m ) => Tree (WeederNode, ContextInfoMap) -> m ()
+analyseDataDeclaration ast@(rootLabel -> (n, contextMap)) = do
   guard $ annsContain n ("DataDecl", "TyClDecl")
 
   Config{ unusedTypes } <- asks weederConfig
 
-  for_
-    ( foldMap
-        ( First . Just )
-        ( findIdentifiers ( any isDataDec ) n )
-    )
+  (results, _) <-
+    topLevelAnalysis ast \a -> asum
+      [ fmap Left (getConstructor a)
+      , fmap Right (getDerivingClause a)
+      ]
+
+  let (constructors, derivingClauses) = partitionEithers results
+      dataDecs = declsOfContext isDataDec contextMap
+      uses' = declsOfContext isUse contextMap
+
+  for_ (listToMaybe dataDecs)
     \dataTypeName -> do
       when unusedTypes $
-        define dataTypeName (nodeSpan n)
+        define dataTypeName n
 
-      -- Without connecting constructors to the data declaration TypeAliasGADT.hs 
-      -- fails with a false positive for A
-      conDecs <- for ( constructors n ) \constructor ->
-        for ( foldMap ( First . Just ) ( findIdentifiers ( any isConDec ) constructor ) ) \conDec -> do
-          addDependency conDec dataTypeName
-          pure conDec
+      for_ constructors \(rootLabel -> (_, conMap)) -> do
+        let conDecs = declsOfContext isConDec conMap
+        for ( listToMaybe conDecs ) (`addDependency` dataTypeName)
 
-      -- To keep acyclicity in record declarations
-      let isDependent d = Just d `elem` fmap getFirst conDecs
+      -- This creates a mutual dependency between the data type and its
+      -- constructors, but that doesn't matter since we do not analyse
+      -- unused constructors
+      for_ uses' (addDependency dataTypeName)
 
-      for_ ( uses n ) (\d -> unless (isDependent d) $ addDependency dataTypeName d)
+  for_ derivingClauses \(rootLabel -> (_, derivMap)) -> do
+    let evInstBinds = extractEvInstBinds derivMap
+    for_ evInstBinds \(d, c, i, instAst@(rootLabel -> instNode)) -> do
+      -- May be better to make use of 'topLevelAnalysis' here to avoid
+      -- the extra 'searchContextInfo' call
+      let instMap = snd . rootLabel $ searchContextInfo instAst
+          instUses = declsOfContext isUse instMap
 
-  for_ ( derivedInstances n ) \(d, cs, ids, ast) -> do
-    define d (nodeSpan ast)
+      define d instNode
 
-    requestEvidence ast d
+      requestEvidence' instMap d
 
-    for_ ( uses ast ) $ addDependency d
+      for_ instUses $ addDependency d
 
-    case identType ids of
-      Just t -> for_ cs (addInstanceRoot d t)
-      Nothing -> pure ()
+      case identWeederType i of
+        Just t -> addInstanceRoot' d t c
+        Nothing -> pure ()
 
   where
 
@@ -532,148 +557,125 @@ analyseDataDeclaration n = do
       _             -> False
 
 
-constructors :: HieAST a -> Seq ( HieAST a )
-constructors = findNodeTypes "ConDecl"
+getConstructor :: Alternative m => Tree (WeederNode, ContextInfoMap) -> m (Tree (WeederNode, ContextInfoMap))
+getConstructor ast@(rootLabel -> (WeederNode{ nodeAnns }, _)) = do
+  guard $ any ((== "ConDecl") . nodeAnnotType) nodeAnns
+
+  pure ast
 
 
-derivedInstances :: HieAST a -> Seq (Declaration, Set Name, IdentifierDetails a, HieAST a)
-derivedInstances n = findNodeTypes "HsDerivingClause" n >>= findEvInstBinds
+getDerivingClause :: Alternative m => Tree (WeederNode, ContextInfoMap) -> m (Tree (WeederNode, ContextInfoMap))
+getDerivingClause ast@(rootLabel -> (WeederNode{ nodeAnns }, _)) = do
+  guard $ any ((== "HsDerivingClause") . nodeAnnotType) nodeAnns
+
+  pure ast
 
 
-findNodeTypes :: String -> HieAST a -> Seq ( HieAST a )
-findNodeTypes t n@Node{ nodeChildren, sourcedNodeInfo } =
-  if any (any ( (t ==) . unpackFS . nodeAnnotType) . nodeAnnotations) (getSourcedNodeInfo sourcedNodeInfo) then
-    pure n
-
-  else
-    foldMap (findNodeTypes t) nodeChildren
-
-
-analyseStandaloneDeriving :: ( Alternative m, MonadState Analysis m, MonadReader AnalysisInfo m ) => HieAST TypeIndex -> m ()
-analyseStandaloneDeriving n@Node{ nodeSpan } = do
+analyseStandaloneDeriving :: ( Alternative m, MonadState Analysis m, MonadReader AnalysisInfo m ) => Tree (WeederNode, ContextInfoMap) -> m ()
+analyseStandaloneDeriving (rootLabel -> (n, contextMap)) = do
   guard $ annsContain n ("DerivDecl", "DerivDecl")
 
-  for_ (findEvInstBinds n) \(d, cs, ids, _) -> do
-    define d nodeSpan
+  let evInstBinds = extractEvInstBinds contextMap
+      uses' = declsOfContext isUse contextMap
 
-    requestEvidence n d
+  for_ evInstBinds \(d, c, i, _) -> do
+    define d n
 
-    for_ (uses n) $ addDependency d
+    requestEvidence' contextMap d
 
-    case identType ids of
-      Just t -> for_ cs (addInstanceRoot d t)
+    for_ uses' $ addDependency d
+
+    case identWeederType i of
+      Just t -> addInstanceRoot' d t c
       Nothing -> pure ()
 
 
-analyseTypeSynonym :: ( Alternative m, MonadState Analysis m ) => HieAST a -> m ()
-analyseTypeSynonym n@Node{ nodeSpan } = do
+analyseTypeSynonym :: ( Alternative m, MonadState Analysis m ) => Tree (WeederNode, ContextInfoMap) -> m ()
+analyseTypeSynonym (rootLabel -> (n, contextMap)) = do
   guard $ annsContain n ("SynDecl", "TyClDecl")
 
-  for_ ( findIdentifiers isTypeSynonym n ) $ \d -> do
-    define d nodeSpan
+  let ds = declsOfContext isTypeSynonym contextMap
+      uses' = declsOfContext isUse contextMap
 
-    for_ (uses n) (addDependency d)
+  for_ ds $ \d -> do
+    define d n
+
+    for_ uses' (addDependency d)
 
   where
 
     isTypeSynonym =
-      any \case
+      \case
         Decl SynDec _ -> True
         _             -> False
 
 
-analyseFamilyDeclaration :: ( Alternative m, MonadState Analysis m ) => HieAST a -> m ()
-analyseFamilyDeclaration n@Node{ nodeSpan } = do
+analyseFamilyDeclaration :: ( Alternative m, MonadState Analysis m ) => Tree (WeederNode, ContextInfoMap) -> m ()
+analyseFamilyDeclaration (rootLabel -> (n, contextMap)) = do
   guard $ annsContain n ("FamDecl", "TyClDecl")
 
-  for_ ( findIdentifiers isFamDec n ) $ \d -> do
-    define d nodeSpan
+  let ds = declsOfContext isFamDec contextMap
+      uses' = declsOfContext isUse contextMap
 
-    for_ (uses n) (addDependency d)
+  for_ ds $ \d -> do
+    define d n
+
+    for_ uses' (addDependency d)
 
   where
 
     isFamDec =
-      any \case
+      \case
         Decl FamDec _ -> True
         _             -> False
 
 
-analyseFamilyInstance :: ( Alternative m, MonadState Analysis m ) => HieAST a -> m ()
-analyseFamilyInstance n = do
+analyseFamilyInstance :: ( Alternative m, MonadState Analysis m ) => Tree (WeederNode, ContextInfoMap) -> m ()
+analyseFamilyInstance (rootLabel -> (n, contextMap)) = do
   guard $ annsContain n ("TyFamInstD", "InstDecl")
 
-  for_ ( uses n ) addImplicitRoot
+  for_ ( declsOfContext isUse contextMap ) addImplicitRoot
 
 
-analyseTypeSignature :: ( Alternative m, MonadState Analysis m ) => HieAST a -> m ()
-analyseTypeSignature n = do
+analyseTypeSignature :: ( Alternative m, MonadState Analysis m ) => Tree (WeederNode, ContextInfoMap) -> m ()
+analyseTypeSignature (rootLabel -> (n, contextMap)) = do
   guard $ annsContain n ("TypeSig", "Sig")
 
-  for_ (findIdentifiers isTypeSigDecl n) $
-    for_ ( uses n ) . addDependency
+  let ds = declsOfContext isTypeSigDecl contextMap
+      uses' = declsOfContext isUse contextMap
+
+  for_ ds $
+    for_ uses' . addDependency
 
   where
 
     isTypeSigDecl =
-      any \case
+      \case
         TyDecl -> True
         _      -> False
 
 
-analysePatternSynonyms :: ( Alternative m, MonadState Analysis m ) => HieAST a -> m ()
-analysePatternSynonyms n = do
+analysePatternSynonyms :: ( Alternative m, MonadState Analysis m ) => Tree (WeederNode, ContextInfoMap) -> m ()
+analysePatternSynonyms (rootLabel -> (n, contextMap)) = do
   guard $ annsContain n ("PatSynBind", "HsBindLR")
 
-  for_ ( findDeclarations n ) $ for_ ( uses n ) . addDependency
+  let ds = declsOfContext isDeclaration contextMap
+      uses' = declsOfContext isUse contextMap
+
+  for_ ds $ for_ uses' . addDependency
 
 
-findEvInstBinds :: HieAST a -> Seq (Declaration, Set Name, IdentifierDetails a, HieAST a)
-findEvInstBinds n = (\(d, ids, ast) -> (d, getClassNames ids, ids, ast)) <$>
-  findIdentifiers'
-    (   not
-      . Set.null
-      . getEvVarSources
-    ) n
+isDeclaration :: ContextInfo -> Bool
+isDeclaration = \case
+  -- Things that count as declarations
+  ValBind RegularBind ModuleScope _ -> True
+  PatternBind ModuleScope _ _       -> True
+  Decl _ _                          -> True
+  TyDecl                            -> True
+  ClassTyDecl{}                     -> True
 
-  where
-
-    getEvVarSources :: Set ContextInfo -> Set EvVarSource
-    getEvVarSources = foldMap (maybe mempty Set.singleton) .
-      Set.map \case
-        EvidenceVarBind a@EvInstBind{} ModuleScope _ -> Just a
-        _ -> Nothing
-
-    getClassNames :: IdentifierDetails a -> Set Name
-    getClassNames =
-      Set.map cls
-      . getEvVarSources
-      . identInfo
-
-
-findDeclarations :: HieAST a -> Seq Declaration
-findDeclarations =
-  findIdentifiers
-    (   not
-      . Set.null
-      . Set.filter \case
-          -- Things that count as declarations
-          ValBind RegularBind ModuleScope _ -> True
-          PatternBind ModuleScope _ _       -> True
-          Decl _ _                          -> True
-          TyDecl                            -> True
-          ClassTyDecl{}                     -> True
-
-          -- Anything else is not a declaration
-          _ -> False
-    )
-
-
-findIdentifiers
-  :: ( Set ContextInfo -> Bool )
-  -> HieAST a
-  -> Seq Declaration
-findIdentifiers f = fmap (\(d, _, _) -> d) . findIdentifiers' f
+  -- Anything else is not a declaration
+  _ -> False
 
 
 -- | Version of findIdentifiers containing more information,
@@ -700,11 +702,6 @@ findIdentifiers' f n@Node{ sourcedNodeInfo, nodeChildren } =
   <> foldMap ( findIdentifiers' f ) nodeChildren
 
 
-uses :: HieAST a -> Set Declaration
-uses =
-    foldMap Set.singleton
-  . findIdentifiers (any isUse)
-
 isUse :: ContextInfo -> Bool
 isUse = \case
   Use -> True
@@ -716,35 +713,29 @@ isUse = \case
   _ -> False
 
 
+getEvidenceBindClass :: ContextInfo -> Maybe Declaration
+getEvidenceBindClass (EvidenceVarBind a@EvInstBind{} ModuleScope _) =
+  nameToDeclaration (cls a)
+getEvidenceBindClass _ = Nothing
+
+
 nameToDeclaration :: Name -> Maybe Declaration
 nameToDeclaration name = do
   m <- nameModule_maybe name
   return Declaration { declModule = m, declOccName = nameOccName name }
 
 
-unNodeAnnotation :: NodeAnnotation -> (String, String)
-unNodeAnnotation (NodeAnnotation x y) = (unpackFS x, unpackFS y)
-
-
--- | Add evidence uses found under the given node to 'requestedEvidence'.
-requestEvidence :: ( MonadState Analysis m, MonadReader AnalysisInfo m ) => HieAST a -> Declaration -> m ()
-requestEvidence n d = do
+-- | Add evidence uses found in the given 'ContextInfoMap' to 'requestedEvidence'
+requestEvidence' :: ( MonadState Analysis m, MonadReader AnalysisInfo m ) => ContextInfoMap -> Declaration -> m ()
+requestEvidence' contextMap d = do
   Config{ typeClassRoots } <- asks weederConfig
 
+  let names = mapMaybe (identName . snd) $ lookupMonoid EvidenceVarUse contextMap
+  
   -- If type-class-roots flag is set then we don't need to follow
   -- evidence uses as the binding sites will be roots anyway
   unless typeClassRoots $
     #requestedEvidence %= Map.insertWith (<>) d (Set.fromList names)
-
-  where
-
-    names = concat . Tree.flatten $ evidenceUseTree n
-
-    evidenceUseTree :: HieAST a -> Tree [Name]
-    evidenceUseTree Node{ sourcedNodeInfo, nodeChildren } = Tree.Node
-      { Tree.rootLabel = concatMap (findEvidenceUse . nodeIdentifiers) (getSourcedNodeInfo sourcedNodeInfo)
-      , Tree.subForest = map evidenceUseTree nodeChildren
-      }
 
 
 -- | Follow the given evidence uses back to their instance bindings,
