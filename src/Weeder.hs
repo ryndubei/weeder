@@ -1,14 +1,10 @@
 {-# language ApplicativeDo #-}
 {-# language BlockArguments #-}
-{-# language DeriveGeneric #-}
 {-# language DeriveAnyClass #-}
-{-# language FlexibleContexts #-}
 {-# language LambdaCase #-}
-{-# language NamedFieldPuns #-}
 {-# language NoImplicitPrelude #-}
 {-# language OverloadedLabels #-}
 {-# language OverloadedStrings #-}
-{-# language TupleSections #-}
 
 module Weeder
   ( -- * Analysis

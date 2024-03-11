@@ -1,8 +1,6 @@
 {-# language RecordWildCards #-}
 {-# language BlockArguments #-}
 {-# language LambdaCase #-}
-{-# language NamedFieldPuns #-}
-{-# LANGUAGE FlexibleContexts #-}
 
 module Weeder.Run ( runWeeder, Weed(..), formatWeed ) where
 

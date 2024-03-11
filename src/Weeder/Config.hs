@@ -4,9 +4,6 @@
 {-# language RecordWildCards #-}
 {-# language LambdaCase #-}
 {-# language PatternSynonyms #-}
-{-# language FlexibleInstances #-}
-{-# language DeriveTraversable #-}
-{-# language NamedFieldPuns #-}
 
 module Weeder.Config
   ( -- * Config

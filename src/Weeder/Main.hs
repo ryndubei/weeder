@@ -1,7 +1,5 @@
 {-# language ApplicativeDo #-}
 {-# language BlockArguments #-}
-{-# language FlexibleContexts #-}
-{-# language NamedFieldPuns #-}
 {-# language OverloadedStrings #-}
 {-# language LambdaCase #-}
 {-# language RecordWildCards #-}
