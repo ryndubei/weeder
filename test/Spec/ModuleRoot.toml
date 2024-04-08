@@ -1,0 +1,3 @@
+roots = []
+
+root-modules = [ '^Spec\.ModuleRoot\.M$' ]
