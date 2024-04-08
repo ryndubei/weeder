@@ -72,6 +72,7 @@ test-suite weeder-test
     , ghc
     , hspec
     , process
+    , template-haskell
     , text
     , toml-reader
     , weeder
@@ -100,6 +101,8 @@ test-suite weeder-test
     Spec.RangeEnum.RangeEnum
     Spec.RootClasses.RootClasses
     Spec.StandaloneDeriving.StandaloneDeriving
+    Spec.TemplateHaskell.TH
+    Spec.TemplateHaskell.User
     Spec.TypeAliasGADT.TypeAliasGADT
     Spec.TypeDataDecl.TypeDataDecl
     Spec.Types.Types
