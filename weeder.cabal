@@ -82,7 +82,6 @@ test-suite weeder-test
     Paths_weeder
   other-modules:
     Paths_weeder
-    UnitTests
     -- Tests
     Spec.ApplicativeDo.ApplicativeDo
     Spec.BasicExample.BasicExample
