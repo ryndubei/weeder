@@ -56,7 +56,7 @@ import qualified Data.Tree as Tree
 import Data.Generics.Labels ()
 
 -- ghc
-import GHC.Data.FastString ( unpackFS )
+import GHC.Data.FastString ( FastString )
 import GHC.Iface.Ext.Types
   ( BindType( RegularBind )
   , ContextInfo( Decl, ValBind, PatternBind, Use, TyDecl, ClassTyDecl, EvidenceVarBind, RecField )
@@ -387,14 +387,14 @@ topLevelAnalysis n@Node{ nodeChildren } = do
       return ()
 
 
-annsContain :: HieAST a -> (String, String) -> Bool
-annsContain Node{ sourcedNodeInfo } ann =
-  any (Set.member ann . Set.map unNodeAnnotation . nodeAnnotations) $ getSourcedNodeInfo sourcedNodeInfo
+annsContain :: HieAST a -> (FastString, FastString) -> Bool
+annsContain Node{ sourcedNodeInfo } (a,b) =
+  any (Set.member (NodeAnnotation a b) . nodeAnnotations) $ getSourcedNodeInfo sourcedNodeInfo
 
 
 analyseBinding :: ( Alternative m, MonadState Analysis m, MonadReader AnalysisInfo m ) => HieAST a -> m ()
 analyseBinding n@Node{ nodeSpan } = do
-  let bindAnns = Set.fromList [("FunBind", "HsBindLR"), ("PatBind", "HsBindLR")]
+  let bindAnns = [("FunBind", "HsBindLR"), ("PatBind", "HsBindLR")]
   guard $ any (annsContain n) bindAnns
 
   for_ ( findDeclarations n ) \d -> do
@@ -509,9 +509,9 @@ derivedInstances :: HieAST a -> Seq (Declaration, Set Name, IdentifierDetails a,
 derivedInstances n = findNodeTypes "HsDerivingClause" n >>= findEvInstBinds
 
 
-findNodeTypes :: String -> HieAST a -> Seq ( HieAST a )
+findNodeTypes :: FastString -> HieAST a -> Seq ( HieAST a )
 findNodeTypes t n@Node{ nodeChildren, sourcedNodeInfo } =
-  if any (any ( (t ==) . unpackFS . nodeAnnotType) . nodeAnnotations) (getSourcedNodeInfo sourcedNodeInfo) then
+  if any (any ( (t ==) . nodeAnnotType) . nodeAnnotations) (getSourcedNodeInfo sourcedNodeInfo) then
     pure n
 
   else
@@ -689,10 +689,6 @@ nameToDeclaration :: Name -> Maybe Declaration
 nameToDeclaration name = do
   m <- nameModule_maybe name
   return Declaration { declModule = m, declOccName = nameOccName name }
-
-
-unNodeAnnotation :: NodeAnnotation -> (String, String)
-unNodeAnnotation (NodeAnnotation x y) = (unpackFS x, unpackFS y)
 
 
 -- | Add evidence uses found under the given node to 'requestedEvidence'.
