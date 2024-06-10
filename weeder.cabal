@@ -48,6 +48,7 @@ library
   autogen-modules:
     Paths_weeder
   other-modules:
+    HieDependencyGraph
     Paths_weeder
   ghc-options: -Wall -fwarn-incomplete-uni-patterns -threaded
   default-language: Haskell2010
