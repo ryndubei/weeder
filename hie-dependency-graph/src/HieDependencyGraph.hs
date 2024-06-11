@@ -1,11 +1,12 @@
 {-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE TupleSections #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE ApplicativeDo #-}
 module HieDependencyGraph (analyseHieFiles) where
 
 import GHC.Iface.Ext.Types
 import qualified Algebra.Graph.Labelled as G
-import Algebra.Graph.Labelled ((>-), (-<))
 import qualified Data.Map.Strict as Map
 import GHC.Iface.Ext.Utils
 import Control.Monad.Trans.State.Strict
@@ -19,14 +20,54 @@ import qualified Data.Set as Set
 import Control.Monad
 import Data.Maybe
 import GHC.Iface.Type
-import GHC.Plugins (showSDocOneLine, defaultSDocContext)
+import GHC.Plugins (showSDocOneLine, defaultSDocContext, moduleStableString, mkModuleName)
 import Control.Monad.Trans.Class
-
+import GHC.Exts (IsString(..))
+import Data.Bifunctor
+import Data.List (intercalate)
+import qualified Text.ParserCombinators.ReadP as R
 
 data Declaration = Declaration
   { declModule :: Module
   , declOccName :: OccName
   } deriving (Eq, Ord)
+
+instance IsString Declaration where
+  fromString str = fst . fromJust . find (null . snd) . flip R.readP_to_S str $ do
+    namespace1 <- R.many1 (R.satisfy (/= '$'))
+    let namespace = case namespace1 of
+          "var" -> varName
+          "tv" -> tvName
+          "tc" -> tcName
+          "data" -> dataName
+          _ -> error "Unknown namespace"
+    _ <- R.char '$'
+    _ <- R.char '$'
+    unit <- stringToUnit <$> R.many1 (R.satisfy (/= '$'))
+    _ <- R.char '$'
+    modName <- R.many1 (R.satisfy (/= '$'))
+    _ <- R.char '$'
+    _ <- R.char '$'
+    name <- R.many1 R.get
+    let m = Module unit (mkModuleName modName)
+        n = mkOccName namespace name
+    pure $ Declaration m n
+
+instance Show Declaration where
+  show = declarationStableName
+
+declarationStableName :: Declaration -> String
+declarationStableName Declaration { declModule, declOccName } =
+  let
+    namespace
+      | isVarOcc declOccName     = "var"
+      | isTvOcc declOccName      = "tv"
+      | isTcOcc declOccName      = "tc"
+      | isDataOcc declOccName    = "data"
+      | otherwise                = "unknown"
+
+    in
+    intercalate "$" [ namespace, moduleStableString declModule, "$", occNameString declOccName ]
 
 data Dependency = TypeOf
   deriving (Eq, Ord)

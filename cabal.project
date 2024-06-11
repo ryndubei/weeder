@@ -1,2 +1,3 @@
 packages:
   weeder.cabal
+  ./hie-dependency-graph
