@@ -1,1 +1,1 @@
-test/Spec/TypeFamilies/TypeFamilies.hs:9: (Type Family Instance) :: Family Bool
+main: test/Spec/TypeFamilies/TypeFamilies.hs:18:1: UnusedFamily

@@ -114,7 +114,6 @@ test-suite weeder-test
     Spec.Types.Types
     Spec.Types.Usages
     Spec.TypeFamilies.TypeFamilies
-    Spec.TypeFamilies.TypeFamilyUsage
     Spec.TypesUnused.TypesUnused
     UnitTests.Weeder.ConfigSpec
   ghc-options: -Wall -fwarn-incomplete-uni-patterns -fwrite-ide-info -hiedir ./test

@@ -1,4 +1,4 @@
-roots = [ "Spec.TypeFamilies.TypeFamilyUsage.root" ]
+roots = [ 'Spec\.TypeFamilies\.TypeFamilies\.root' ]
 
 type-class-roots = false
 
