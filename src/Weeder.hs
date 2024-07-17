@@ -584,7 +584,7 @@ analyseFamilyDeclaration n@Node{ nodeSpan } = do
 
 analyseFamilyInstance :: ( Alternative m, MonadState Analysis m ) => HieAST a -> m ()
 analyseFamilyInstance n = do
-  guard $ annsContain n ("TyFamInstD", "InstDecl")
+  guard $ any (annsContain n) [ ("TyFamInstD", "InstDecl"), ("DataFamInstD", "InstDecl") ]
 
   for_ ( uses n ) addImplicitRoot
 
